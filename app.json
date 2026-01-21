@@ -3,6 +3,7 @@
     "name": "greencore_app_react",
     "slug": "greencore_app_react",
     "version": "1.0.0",
+    "sdkVersion": "54.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
