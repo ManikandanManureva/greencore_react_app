@@ -39,7 +39,7 @@ import {
 } from 'lucide-react-native';
 import { useAuth } from '../navigation/AuthContext';
 import { productionApi } from '../api/production';
-import { Station, ProductionLog } from '../types';
+import { Station, ProductionLog, Shift } from '../types';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { CameraView, Camera } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
@@ -57,7 +57,7 @@ const DashboardScreen = ({ navigation }: any) => {
   
   // Shift State
   const [isShiftActive, setIsShiftActive] = useState(false);
-  const [shiftStartTime, setShiftStartTime] = useState<number>(0);
+  const [shiftStartTime, setShiftStartTime] = useState<number | null>(null);
   const [shiftDuration, setShiftDuration] = useState('0h 00m 00s');
   const [backendShiftId, setBackendShiftId] = useState<number | null>(null);
   const [shiftLogs, setShiftLogs] = useState<ProductionLog[]>([]);
@@ -191,6 +191,79 @@ const DashboardScreen = ({ navigation }: any) => {
     }
   };
 
+  // Calculate shift end time based on shift type and actual start time
+  const calculateShiftEndTime = (shiftStartTimestamp: number, shiftType: Shift | null): number | null => {
+    if (!shiftType || !shiftType.start_time || !shiftType.end_time) return null;
+    
+    try {
+      // Parse shift type times (e.g., "08:00", "16:00")
+      const parseTime = (timeStr: string): number => {
+        const [hours, minutes] = timeStr.split(':').map(Number);
+        return hours * 60 + minutes; // minutes since midnight
+      };
+      
+      const shiftTypeStartMinutes = parseTime(shiftType.start_time);
+      const shiftTypeEndMinutes = parseTime(shiftType.end_time);
+      const shiftDurationMinutes = shiftTypeEndMinutes - shiftTypeStartMinutes;
+      
+      // If end time is before start time (e.g., night shift), add 24 hours
+      const actualDuration = shiftDurationMinutes < 0 ? shiftDurationMinutes + 24 * 60 : shiftDurationMinutes;
+      
+      // Calculate end time: shift start + duration + 15 minutes grace period
+      const gracePeriodMinutes = 15;
+      const shiftEndTimestamp = shiftStartTimestamp + (actualDuration * 60 * 1000) + (gracePeriodMinutes * 60 * 1000);
+      
+      return shiftEndTimestamp;
+    } catch (error) {
+      console.error('Error calculating shift end time:', error);
+      return null;
+    }
+  };
+
+  // Auto-close shift when time expires
+  useEffect(() => {
+    if (!isShiftActive || !backendShiftId || !selectedShift || !shiftStartTime) return;
+    
+    const checkAndAutoCloseShift = async () => {
+      const shiftEndTime = calculateShiftEndTime(shiftStartTime, selectedShift);
+      if (!shiftEndTime) return;
+      
+      const now = Date.now();
+      if (now >= shiftEndTime) {
+        // Shift has ended (including grace period), auto-close it
+        try {
+          console.log('Auto-closing shift due to time expiration');
+          const response = await productionApi.endShift(backendShiftId);
+          if (response.data.success) {
+            Alert.alert(
+              'Shift Auto-Closed',
+              `Your ${selectedShift.name} shift has automatically ended after the 15-minute grace period.`,
+              [{ text: 'OK', onPress: () => {
+                setIsShiftActive(false);
+                setBackendShiftId(null);
+                setShiftLogs([]);
+                setShiftStartTime(null);
+                setSelectedStation(null);
+                setSelectedSection(null);
+                setSelectedSubLine(null);
+              }}]
+            );
+          }
+        } catch (error) {
+          console.error('Error auto-closing shift:', error);
+        }
+      }
+    };
+    
+    // Check immediately
+    checkAndAutoCloseShift();
+    
+    // Then check every minute
+    const interval = setInterval(checkAndAutoCloseShift, 60 * 1000);
+    
+    return () => clearInterval(interval);
+  }, [isShiftActive, backendShiftId, selectedShift, shiftStartTime]);
+
   const loadStations = async () => {
     try {
       const response = await productionApi.getStations();
@@ -211,7 +284,7 @@ const DashboardScreen = ({ navigation }: any) => {
 
   useEffect(() => {
     let interval: any;
-    if (isShiftActive && shiftStartTime) {
+    if (isShiftActive && shiftStartTime !== null) {
       interval = setInterval(() => {
         const diff = Date.now() - shiftStartTime;
         const hours = Math.floor(diff / (1000 * 60 * 60));
@@ -492,6 +565,12 @@ const DashboardScreen = ({ navigation }: any) => {
         targetStationId = 3;
         statusFilter = 'pending';
         expectedStationName = 'washing';
+      } else if (selectedStation?.id === 5 || selectedStation?.name?.toLowerCase().includes('final') || selectedStation?.name?.toLowerCase().includes('packing')) {
+        // Final Packaging expects extrusion batches with status pending only
+        const extStation = stations.find((s: Station) => s.name?.toLowerCase().includes('extrusion') || s.id === 4);
+        targetStationId = extStation?.id ?? 4;
+        statusFilter = 'pending';
+        expectedStationName = 'extrusion';
       }
 
       // If we have a target station, validate the QR code
@@ -742,13 +821,35 @@ const DashboardScreen = ({ navigation }: any) => {
         }
         return;
       }
+      // Final Packaging: only extrusion list with status pending
+      const isFinalPackaging = selectedStation?.id === 5 ||
+        selectedStation?.name?.toLowerCase().includes('final') ||
+        selectedStation?.name?.toLowerCase().includes('packing');
+      if (isFinalPackaging) {
+        if (!text || text.trim().length === 0) {
+          setSuggestedBags([]);
+          setShowSuggestions(false);
+          return;
+        }
+        const extStation = stations.find((s: Station) => s.name?.toLowerCase().includes('extrusion') || s.id === 4);
+        targetStationId = extStation?.id ?? 4;
+        statusFilter = 'pending';
+        const response = await productionApi.searchLogs(text, targetStationId, selectedStation?.id, statusFilter);
+        if (response.data.success) {
+          setSuggestedBags(response.data.data);
+          setShowSuggestions(response.data.data.length > 0);
+        } else {
+          setSuggestedBags([]);
+          setShowSuggestions(false);
+        }
+        return;
+      }
       // For other stations, require at least 2 characters
-    if (text.length < 2) {
-      setSuggestedBags([]);
-      setShowSuggestions(false);
-      return;
-    }
-      if (selectedStation?.id === 5) targetStationId = 4; // Final Packaging searches from Extrusion
+      if (text.length < 2) {
+        setSuggestedBags([]);
+        setShowSuggestions(false);
+        return;
+      }
       const response = await productionApi.searchLogs(text, targetStationId, selectedStation?.id);
       if (response.data.success) {
         setSuggestedBags(response.data.data);
@@ -1507,7 +1608,7 @@ const DashboardScreen = ({ navigation }: any) => {
                             // If this is washing station, ONLY update the existing crusher batch (NO new entry)
                             if (isWashingStation && selectedInputBag.output_bag_qr) {
                               // Pass the selected washing line name (e.g., "Washing 1", "Washing 2", "Washing 3")
-                              const washingLine = selectedSubLine || null;
+                              const washingLine = selectedSubLine || undefined;
                               const response = await productionApi.updateLogStatus(selectedInputBag.output_bag_qr, 'Completed', washingLine);
                               if (response.data.success) {
                           Alert.alert('Success', 'Material processing started');
@@ -2076,10 +2177,15 @@ const DashboardScreen = ({ navigation }: any) => {
                                                      selectedStation.code === 'WSH' || 
                                                      selectedStation.id === 3;
                             
+                            // Check if this is Final Packaging station
+                            const isFinalPackaging = selectedStation?.id === 5 ||
+                              selectedStation?.name?.toLowerCase().includes('final') ||
+                              selectedStation?.name?.toLowerCase().includes('packing');
+                            
                             // If this is washing station, ONLY update the existing crusher batch (NO new entry)
                             if (isWashingStation && selectedInputBag.output_bag_qr) {
                               // Pass the selected washing line name (e.g., "Washing 1", "Washing 2", "Washing 3")
-                              const washingLine = selectedSubLine || null;
+                              const washingLine = selectedSubLine || undefined;
                               const response = await productionApi.updateLogStatus(selectedInputBag.output_bag_qr, 'Completed', washingLine);
                               if (response.data.success) {
                                 Alert.alert('Success', 'Material processing started');
@@ -2091,8 +2197,25 @@ const DashboardScreen = ({ navigation }: any) => {
                               } else {
                                 Alert.alert('Error', 'Failed to update batch status');
                               }
+                            } else if (isFinalPackaging && selectedInputBag.output_bag_qr) {
+                              // Final Packaging: ONLY update the existing extrusion batch (NO new entry)
+                              // Update status to 'Completed' and set used_line (Final Packaging line/subline if available)
+                              const finalPackagingLine = selectedSubLine || selectedStation.name || undefined;
+                              const response = await productionApi.updateLogStatus(selectedInputBag.output_bag_qr, 'Completed', undefined, undefined, finalPackagingLine);
+                              if (response.data.success) {
+                                Alert.alert('Success', 'Material processing started');
+                                setSelectedInputBag(null);
+                                setBagSearchQuery('');
+                                setSuggestedBags([]);
+                                setShowSuggestions(false);
+                                setSelectedStation(null);
+                                setSelectedSubLine(null);
+                                setSelectedSection(null);
+                              } else {
+                                Alert.alert('Error', 'Failed to update batch status');
+                              }
                             } else {
-                              // For other stations (NOT washing), create a new processing log entry
+                              // For other stations (NOT washing, NOT Final Packaging), create a new processing log entry
                               if (!backendShiftId) {
                                 Alert.alert('Error', 'No active shift');
                                 return;

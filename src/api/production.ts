@@ -40,12 +40,13 @@ export const productionApi = {
     if (status) params.status = status;
     return client.get('/production/extrusion-logs', { params });
   },
-  updateLogStatus: (outputBagQr: string, status: string, washingLine?: string, extrusionLine?: string) => {
+  updateLogStatus: (outputBagQr: string, status: string, washingLine?: string, extrusionLine?: string, usedLine?: string) => {
     const body: any = { outputBagQr, status };
-    if (washingLine) {
+    if (usedLine) {
+      body.usedLine = usedLine;
+    } else if (washingLine) {
       body.washingLine = washingLine;
-    }
-    if (extrusionLine) {
+    } else if (extrusionLine) {
       body.extrusionLine = extrusionLine;
     }
     return client.put('/production/update-log-status', body);
