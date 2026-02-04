@@ -5,26 +5,13 @@ import { Platform } from 'react-native';
 
 // Get the host machine IP dynamically for physical devices during development
 const getBaseUrl = () => {
-  // Use your computer's local IP address so physical mobile devices can connect
-  const LOCAL_IP = '172.16.0.52'; 
+  // Production API server
+  const API_HOST = '13.214.29.7';
+  //const API_PORT = '5000';
 
-  if (Platform.OS === 'web') {
-    return 'http://localhost:3000/api';
-  }
-  
-  // Try to get dynamic host from Expo, fallback to LOCAL_IP
-  const host = Constants.expoConfig?.hostUri?.split(':').shift() || LOCAL_IP;
-  
-  if (host) {
-    return `http://${host}:3000/api`;
-  }
-  
-  // Fallback for Android emulator
-  if (Platform.OS === 'android') {
-    return 'http://10.0.2.2:3000/api';
-  }
-  
-  return `http://${LOCAL_IP}:3000/api`;
+  // For all platforms, use the production API
+  // The server expects /api/api as the base path (e.g., /api/api/auth/login)
+  return `http://${API_HOST}/api/api`;
 };
 
 const API_URL = getBaseUrl();

@@ -73,6 +73,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const login = async (employeeId: string, password: string) => {
     try {
+      console.log('Attempting login for employeeId:', employeeId);
       const response = await client.post('/auth/login', { employeeId, password });
       const { success, token, user: userData, refreshToken } = response.data;
 
@@ -90,7 +91,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     } catch (error: any) {
       console.error('Login error:', error);
-      throw error;
+      // Extract error message from response if available
+      const errorMessage = error.response?.data?.message || error.message || 'Login failed. Please check your credentials.';
+      throw new Error(errorMessage);
     }
   };
 

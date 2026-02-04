@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import {
   StyleSheet,
@@ -35,7 +35,8 @@ import {
   Trash2,
   Scale,
   Printer as PrinterIcon,
-  FileText
+  FileText,
+  Pencil,
 } from 'lucide-react-native';
 import { useAuth } from '../navigation/AuthContext';
 import { productionApi } from '../api/production';
@@ -44,9 +45,34 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { CameraView, Camera } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import QRCode from 'react-native-qrcode-svg';
-import InlineDatePicker from '../components/InlineDatePicker';
+import StationDatePicker from '../components/StationDatePicker';
 
 import { printService } from '../utils/print';
+import { t } from '../utils/i18n';
+
+/** Format date as YYYY-MM-DD in local timezone (avoids toISOString UTC shift). */
+function formatDateLocal(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/** Parse YYYY-MM-DD to Date at local noon (avoids timezone edge cases). */
+function parseDateLocal(s: string): Date {
+  return new Date(s + 'T12:00:00');
+}
+
+/** Waste from machines: per station, per section (sub-line), fixed waste types. */
+const WASTE_CONFIG: {
+  crusher: { subLines: string[]; wasteTypes: string[] };
+  washing: { subLines: string[]; wasteTypes: string[] };
+  extrusion: { subLines: string[]; wasteTypes: string[] };
+} = {
+  crusher: { subLines: ['3E', 'Rapid', 'Betty'], wasteTypes: ['Dust Remove Label', 'Sweep Floor'] },
+  washing: { subLines: ['Washing 1', 'Washing 2', 'Washing 3'], wasteTypes: ['Dust wet'] },
+  extrusion: { subLines: ['Extrusion 1', 'Extrusion 2', 'Extrusion 3', 'Mixture'], wasteTypes: ['Lumps', 'Sweep Floor'] },
+};
 
 const DashboardScreen = ({ navigation }: any) => {
   const { user, logout, selectedShift } = useAuth();
@@ -69,7 +95,7 @@ const DashboardScreen = ({ navigation }: any) => {
   const [pendingStation, setPendingStation] = useState<Station | null>(null);
   const [pendingWashingLine, setPendingWashingLine] = useState<'Washing 1' | 'Washing 2' | 'Washing 3' | null>(null);
   const [showWashingModal, setShowWashingModal] = useState(false);
-  const [pendingExtrusionLine, setPendingExtrusionLine] = useState<'Extrusion 1' | 'Extrusion 2' | 'Extrusion 3' | null>(null);
+  const [pendingExtrusionLine, setPendingExtrusionLine] = useState<'Extrusion 1' | 'Extrusion 2' | 'Extrusion 3' | 'Mixture' | null>(null);
   const [showExtrusionModal, setShowExtrusionModal] = useState(false);
   
   // Input/Output State
@@ -79,46 +105,45 @@ const DashboardScreen = ({ navigation }: any) => {
   const [selectedInputBag, setSelectedInputBag] = useState<any>(null);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [isCurrentLogSaved, setIsCurrentLogSaved] = useState(false);
-  const [selectedSubLine, setSelectedSubLine] = useState<'3E' | 'Rapid' | 'Washing 1' | 'Washing 2' | 'Washing 3' | 'Extrusion 1' | 'Extrusion 2' | 'Extrusion 3' | null>(null);
+  const [selectedSubLine, setSelectedSubLine] = useState<'3E' | 'Rapid' | 'Betty' | 'Washing 1' | 'Washing 2' | 'Washing 3' | 'Extrusion 1' | 'Extrusion 2' | 'Extrusion 3' | 'Mixture' | null>(null);
   const [currentViewBags, setCurrentViewBags] = useState(0);
   const [currentViewWeight, setCurrentViewWeight] = useState(0);
   
   // Crusher logs list state
   const [crusherLogs, setCrusherLogs] = useState<any[]>([]);
   const [crusherLogsLoading, setCrusherLogsLoading] = useState(false);
-  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+  const [selectedDate, setSelectedDate] = useState(formatDateLocal(new Date()));
   const [searchQuery, setSearchQuery] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [totalLogs, setTotalLogs] = useState(0);
-  const [datePickerDate, setDatePickerDate] = useState(new Date());
-  const [selectedLineFilter, setSelectedLineFilter] = useState<string>('all'); // 'all', '3E', 'Rapid'
+  const [selectedLineFilter, setSelectedLineFilter] = useState<string>('all'); // 'all', '3E', 'Rapid', 'Betty'
   const [selectedStatusFilter, setSelectedStatusFilter] = useState<string>('all'); // 'all', 'pending', 'Completed'
   const [showListPrintPreview, setShowListPrintPreview] = useState(false);
   const [selectedLogForPrint, setSelectedLogForPrint] = useState<any>(null);
+  const [editingLogWeight, setEditingLogWeight] = useState<any>(null);
+  const [editWeightValue, setEditWeightValue] = useState('');
 
   // Washing logs list state
   const [washingLogs, setWashingLogs] = useState<any[]>([]);
   const [washingLogsLoading, setWashingLogsLoading] = useState(false);
-  const [washingSelectedDate, setWashingSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+  const [washingSelectedDate, setWashingSelectedDate] = useState(formatDateLocal(new Date()));
   const [washingSearchQuery, setWashingSearchQuery] = useState('');
   const [washingCurrentPage, setWashingCurrentPage] = useState(1);
   const [washingTotalPages, setWashingTotalPages] = useState(1);
   const [washingTotalLogs, setWashingTotalLogs] = useState(0);
-  const [washingDatePickerDate, setWashingDatePickerDate] = useState(new Date());
   const [washingSelectedLineFilter, setWashingSelectedLineFilter] = useState<string>('all'); // 'all', 'Washing 1', 'Washing 2', 'Washing 3'
   const [washingSelectedStatusFilter, setWashingSelectedStatusFilter] = useState<string>('all'); // 'all', 'pending', 'Completed'
   
   // Extrusion logs list state
   const [extrusionLogs, setExtrusionLogs] = useState<any[]>([]);
   const [extrusionLogsLoading, setExtrusionLogsLoading] = useState(false);
-  const [extrusionSelectedDate, setExtrusionSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+  const [extrusionSelectedDate, setExtrusionSelectedDate] = useState(formatDateLocal(new Date()));
   const [extrusionSearchQuery, setExtrusionSearchQuery] = useState('');
   const [extrusionCurrentPage, setExtrusionCurrentPage] = useState(1);
   const [extrusionTotalPages, setExtrusionTotalPages] = useState(1);
   const [extrusionTotalLogs, setExtrusionTotalLogs] = useState(0);
-  const [extrusionDatePickerDate, setExtrusionDatePickerDate] = useState(new Date());
-  const [extrusionSelectedLineFilter, setExtrusionSelectedLineFilter] = useState<string>('all'); // 'all', 'Extrusion 1', 'Extrusion 2', 'Extrusion 3'
+  const [extrusionSelectedLineFilter, setExtrusionSelectedLineFilter] = useState<string>('all'); // 'all', 'Extrusion 1', 'Extrusion 2', 'Extrusion 3', 'Mixture'
   const [extrusionSelectedStatusFilter, setExtrusionSelectedStatusFilter] = useState<string>('all'); // 'all', 'pending', 'Completed'
   
   // Scanner State
@@ -127,20 +152,49 @@ const DashboardScreen = ({ navigation }: any) => {
   const [showScanner, setShowScanner] = useState(false);
 
   // Photo State
-  const [capturedImage, setCapturedImage] = useState<string | null>(null);
+  const [capturedImages, setCapturedImages] = useState<string[]>([]);
+  const [showCameraPreview, setShowCameraPreview] = useState(false);
+  const [showPhotoPreview, setShowPhotoPreview] = useState(false);
+  const [tempCapturedImage, setTempCapturedImage] = useState<string | null>(null);
+  const cameraRef = React.useRef<any>(null);
 
   // Summary State
   const [showEndShiftSummary, setShowEndShiftSummary] = useState(false);
   const [byProductsInputs, setByProductsInputs] = useState<any[]>([]);
 
+  // Shift-closed view (editable by-products, regenerate PDF)
+  const [showShiftClosedView, setShowShiftClosedView] = useState(false);
+  const [closedShiftId, setClosedShiftId] = useState<number | null>(null);
+  const [closedShiftByProducts, setClosedShiftByProducts] = useState<any[]>([]);
+  const [closedShiftMeta, setClosedShiftMeta] = useState<{ shift: string; operator: string; date: string; totalOutputs: number; totalWeight: string; remark?: string; byStation?: { crusher: { outputs: number; weight: string }; washing: { outputs: number; weight: string }; extrusion: { outputs: number; weight: string } }; waste?: { stationName: string; subLine: string; wasteType: string; weight: number }[] } | null>(null);
+  const [closedByProductsLoading, setClosedByProductsLoading] = useState(false);
+  const [editingByProductIndex, setEditingByProductIndex] = useState<number | null>(null);
+  const [editByProductWeight, setEditByProductWeight] = useState('');
+  
+  // PPIC: list and open saved end-shift reports
+  const [showClosedReportsModal, setShowClosedReportsModal] = useState(false);
+  const [closedShiftsList, setClosedShiftsList] = useState<any[]>([]);
+  const [closedShiftsLoading, setClosedShiftsLoading] = useState(false);
+
+  // Saved by-products on start shift page (editable after save)
+  const [savedByProductsOnStartPage, setSavedByProductsOnStartPage] = useState<any[]>([]);
+  const [savedByProductsMeta, setSavedByProductsMeta] = useState<{ shift: string; operator: string; date: string; totalOutputs: number; totalWeight: string; remark?: string; byStation?: { crusher: { outputs: number; weight: string }; washing: { outputs: number; weight: string }; extrusion: { outputs: number; weight: string } }; waste?: { stationName: string; subLine: string; wasteType: string; weight: number }[] } | null>(null);
+  const [endShiftRemark, setEndShiftRemark] = useState('');
+  const [wasteInputs, setWasteInputs] = useState<{ stationId: number; stationKey: string; subLine: string; wasteType: string; weight: string }[]>([]);
+
   // Printer & Preview State
   const [selectedPrinter, setSelectedPrinter] = useState<any>(null);
   const [showPrintPreview, setShowPrintPreview] = useState(false);
   const [previewData, setPreviewData] = useState<any>(null);
+  const [remarkInput, setRemarkInput] = useState('');
+  const [previewBagStatus, setPreviewBagStatus] = useState<'pending' | 'Completed'>('pending');
   const [isPrinting, setIsPrinting] = useState(false);
   const qrRef = React.useRef<any>(null);
   const listQrRef = React.useRef<any>(null);
-  
+
+  /** Stable "today" for date picker max – avoids picker resetting when prop reference changes. */
+  const maxDate = useMemo(() => new Date(), []);
+
   // Initial Load
   useEffect(() => {
     (async () => {
@@ -300,6 +354,13 @@ const DashboardScreen = ({ navigation }: any) => {
     if (!selectedShift) return;
     try {
       setIsLoading(true);
+      // Clear saved by-products when starting new shift
+      setSavedByProductsOnStartPage([]);
+      setSavedByProductsMeta(null);
+      setClosedShiftId(null);
+      setEditingByProductIndex(null);
+      setEditByProductWeight('');
+      
       const response = await productionApi.startShift(selectedShift.id);
       if (response.data.success) {
         setBackendShiftId(response.data.data.id);
@@ -307,7 +368,7 @@ const DashboardScreen = ({ navigation }: any) => {
         setShiftStartTime(Date.now());
       }
     } catch (error) {
-      Alert.alert('Error', 'Failed to start shift');
+      Alert.alert(t('common.error'), t('messages.failedToStartShift'));
     } finally {
       setIsLoading(false);
     }
@@ -316,7 +377,37 @@ const DashboardScreen = ({ navigation }: any) => {
   const handleEndShift = async () => {
     if (!backendShiftId) return;
     initByProducts();
+    initWaste();
     setShowEndShiftSummary(true);
+  };
+
+  const initWaste = () => {
+    const crusherStation = stations.find(s => s.name?.toLowerCase().includes('crusher') || (s as any).code === 'CRS');
+    const washingStation = stations.find(s => s.name?.toLowerCase().includes('washing') || (s as any).code === 'WSH');
+    const extrusionStation = stations.find(s => s.name?.toLowerCase().includes('extrusion') || s.id === 4 || (s as any).code === 'EXT');
+    const list: { stationId: number; stationKey: string; subLine: string; wasteType: string; weight: string }[] = [];
+    if (crusherStation) {
+      for (const sub of WASTE_CONFIG.crusher.subLines) {
+        for (const wt of WASTE_CONFIG.crusher.wasteTypes) {
+          list.push({ stationId: crusherStation.id, stationKey: 'crusher', subLine: sub, wasteType: wt, weight: '' });
+        }
+      }
+    }
+    if (washingStation) {
+      for (const sub of WASTE_CONFIG.washing.subLines) {
+        for (const wt of WASTE_CONFIG.washing.wasteTypes) {
+          list.push({ stationId: washingStation.id, stationKey: 'washing', subLine: sub, wasteType: wt, weight: '' });
+        }
+      }
+    }
+    if (extrusionStation) {
+      for (const sub of WASTE_CONFIG.extrusion.subLines) {
+        for (const wt of WASTE_CONFIG.extrusion.wasteTypes) {
+          list.push({ stationId: extrusionStation.id, stationKey: 'extrusion', subLine: sub, wasteType: wt, weight: '' });
+        }
+      }
+    }
+    setWasteInputs(list);
   };
 
   const initByProducts = () => {
@@ -340,33 +431,290 @@ const DashboardScreen = ({ navigation }: any) => {
     if (!backendShiftId) return;
     try {
       setIsLoading(true);
-      const toSave = byProductsInputs.filter(p => p.weight > 0);
+      const toSave = byProductsInputs.filter(p => Number(p.weight) > 0);
+      const crusherStation = stations.find(s => s.name?.toLowerCase().includes('crusher') || (s as any).code === 'CRS');
+      const washingStation = stations.find(s => s.name?.toLowerCase().includes('washing') || (s as any).code === 'WSH');
+      const extrusionStation = stations.find(s => s.name?.toLowerCase().includes('extrusion') || s.id === 4 || (s as any).code === 'EXT');
+      const byStation = {
+        crusher: { outputs: 0, weight: '0.0' },
+        washing: { outputs: 0, weight: '0.0' },
+        extrusion: { outputs: 0, weight: '0.0' },
+      };
+      if (crusherStation) {
+        const logs = shiftLogs.filter((l: any) => l.station_id === crusherStation.id);
+        byStation.crusher.outputs = logs.length;
+        byStation.crusher.weight = logs.reduce((acc: number, l: any) => acc + Number(l.weight || 0), 0).toFixed(1);
+      }
+      if (washingStation) {
+        const logs = shiftLogs.filter((l: any) => l.station_id === washingStation.id);
+        byStation.washing.outputs = logs.length;
+        byStation.washing.weight = logs.reduce((acc: number, l: any) => acc + Number(l.weight || 0), 0).toFixed(1);
+      }
+      if (extrusionStation) {
+        const logs = shiftLogs.filter((l: any) => l.station_id === extrusionStation.id);
+        byStation.extrusion.outputs = logs.length;
+        byStation.extrusion.weight = logs.reduce((acc: number, l: any) => acc + Number(l.weight || 0), 0).toFixed(1);
+      }
+      const totalOutputs = byStation.crusher.outputs + byStation.washing.outputs + byStation.extrusion.outputs;
+      const totalWeight = (Number(byStation.crusher.weight) + Number(byStation.washing.weight) + Number(byStation.extrusion.weight)).toFixed(1);
+      const byProductsForPdf = toSave.map(p => ({
+        name: p.name,
+        stationName: p.stationName ?? '',
+        category: p.category ?? '',
+        weight: Number(p.weight),
+      }));
+      const wasteToSave = wasteInputs.filter(w => Number(w.weight) > 0).map(w => ({
+        stationId: w.stationId,
+        subLine: w.subLine,
+        wasteType: w.wasteType,
+        weight: Number(w.weight),
+      }));
+      const wasteForPdf = wasteToSave.map(w => {
+        const st = stations.find(s => s.id === w.stationId);
+        return { stationName: st?.name ?? '', subLine: w.subLine, wasteType: w.wasteType, weight: w.weight };
+      });
       await printService.printShiftSummary({
-        shift: selectedShift?.name, operator: user?.name, date: new Date().toLocaleDateString(),
-        totalOutputs: (() => {
-          const extrusionStation = stations.find(s => s.name?.toLowerCase().includes('extrusion') || s.id === 4);
-          if (!extrusionStation) return 0;
-          return shiftLogs.filter((l: any) => l.station_id === extrusionStation.id).length;
-        })(),
-        totalWeight: (() => {
-          const extrusionStation = stations.find(s => s.name?.toLowerCase().includes('extrusion') || s.id === 4);
-          if (!extrusionStation) return '0.0';
-          const extrusionLogs = shiftLogs.filter((l: any) => l.station_id === extrusionStation.id);
-          return extrusionLogs.reduce((acc: number, l: any) => acc + Number(l.weight || 0), 0).toFixed(1);
-        })(),
-        byProducts: toSave
+        shift: selectedShift?.name ?? 'N/A',
+        operator: user?.name ?? 'N/A',
+        date: new Date().toLocaleDateString(),
+        totalOutputs,
+        totalWeight,
+        byStation,
+        byProducts: byProductsForPdf,
+        waste: wasteForPdf.length > 0 ? wasteForPdf : undefined,
+        remark: endShiftRemark.trim() || undefined,
       });
       if (toSave.length > 0) {
-        await productionApi.logByProducts(backendShiftId, toSave.map(p => ({ stationId: p.stationId, name: p.name, weight: p.weight })));
+        await productionApi.logByProducts(backendShiftId, toSave.map(p => ({
+          stationId: p.stationId,
+          name: p.name,
+          weight: typeof p.weight === 'number' ? p.weight : Number(p.weight) || 0,
+          category: p.category ?? '',
+        })));
       }
-      const response = await productionApi.endShift(backendShiftId);
+      const response = await productionApi.endShift(backendShiftId, endShiftRemark.trim() || undefined, wasteToSave.length > 0 ? wasteToSave : undefined);
       if (response.data.success) {
-        setIsShiftActive(false); setBackendShiftId(null); setShiftLogs([]); setShowEndShiftSummary(false);
-        Alert.alert('Success', 'Shift closed successfully');
-        navigation.navigate('ShiftSelection');
+        const savedShiftId = backendShiftId;
+        const savedMeta = {
+          shift: selectedShift?.name ?? 'N/A',
+          operator: user?.name ?? 'N/A',
+          date: new Date().toLocaleDateString(),
+          totalOutputs,
+          totalWeight,
+          byStation,
+          remark: endShiftRemark.trim() || undefined,
+        };
+        const savedByProducts = byProductsForPdf.map((p, i) => ({ ...p, stationId: toSave[i].stationId }));
+        
+        // Store for start shift page display
+        setClosedShiftId(savedShiftId);
+        setSavedByProductsMeta(savedMeta);
+        setSavedByProductsOnStartPage(savedByProducts);
+        
+        setShowEndShiftSummary(false);
+        setEndShiftRemark('');
+        setIsShiftActive(false);
+        setBackendShiftId(null);
+        setShiftLogs([]);
+        // Don't show shift closed view, redirect to start shift page instead
       }
     } catch (error) {
-      Alert.alert('Error', 'Failed to close shift');
+      Alert.alert(t('common.error'), t('messages.failedToCloseShift'));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const fetchClosedShiftByProducts = useCallback(async () => {
+    if (!closedShiftId) return;
+    setClosedByProductsLoading(true);
+    try {
+      const res = await productionApi.getByProducts(closedShiftId);
+      if (res.data?.success && Array.isArray(res.data.data)) {
+        setClosedShiftByProducts(res.data.data.map((r: any) => ({
+          name: r.name,
+          stationName: r.stationName ?? '',
+          category: r.category ?? '',
+          weight: r.weight,
+          stationId: r.stationId,
+        })));
+      }
+    } catch (e) {
+      console.warn('Fetch closed by-products failed', e);
+    } finally {
+      setClosedByProductsLoading(false);
+    }
+  }, [closedShiftId]);
+
+  const handleGeneratePdfAgain = async () => {
+    // Support both closed shift view and start page saved by-products
+    const meta = showShiftClosedView ? closedShiftMeta : savedByProductsMeta;
+    const byProducts = showShiftClosedView ? closedShiftByProducts : savedByProductsOnStartPage;
+    
+    if (!meta) return;
+    await printService.printShiftSummary({
+      shift: meta.shift,
+      operator: meta.operator,
+      date: meta.date,
+      totalOutputs: meta.totalOutputs,
+      totalWeight: meta.totalWeight,
+      byStation: meta.byStation,
+      remark: meta.remark,
+      waste: meta.waste,
+      byProducts: byProducts.map(p => ({
+        name: p.name,
+        stationName: p.stationName ?? '',
+        category: p.category ?? '',
+        weight: typeof p.weight === 'number' ? p.weight : Number(p.weight) || 0,
+      })),
+    });
+  };
+
+  const handleBackToShifts = () => {
+    setShowShiftClosedView(false);
+    setClosedShiftId(null);
+    setClosedShiftByProducts([]);
+    setClosedShiftMeta(null);
+    setEditingByProductIndex(null);
+    // Clear saved by-products on start page
+    setSavedByProductsOnStartPage([]);
+    setSavedByProductsMeta(null);
+    navigation.navigate('ShiftSelection');
+  };
+
+  const handleOpenClosedReports = async () => {
+    setShowClosedReportsModal(true);
+    setClosedShiftsLoading(true);
+    try {
+      const res = await productionApi.getClosedShifts(30);
+      if (res.data?.success && Array.isArray(res.data.data)) {
+        setClosedShiftsList(res.data.data);
+      } else {
+        setClosedShiftsList([]);
+      }
+    } catch (e) {
+      setClosedShiftsList([]);
+    } finally {
+      setClosedShiftsLoading(false);
+    }
+  };
+
+  const handleSelectClosedShift = async (shiftId: number) => {
+    try {
+      const res = await productionApi.getClosedShiftSummary(shiftId);
+      if (!res.data?.success || !res.data.data) return;
+      const d = res.data.data;
+      setClosedShiftId(shiftId);
+      setClosedShiftMeta({
+        shift: d.shift,
+        operator: d.operator,
+        date: d.date,
+        totalOutputs: d.totalOutputs ?? 0,
+        totalWeight: d.totalWeight ?? '0.0',
+        byStation: d.byStation ?? undefined,
+        remark: d.remark,
+        waste: Array.isArray(d.waste) ? d.waste.map((w: any) => ({ stationName: w.stationName ?? '', subLine: w.subLine ?? '', wasteType: w.wasteType ?? '', weight: Number(w.weight) || 0 })) : undefined,
+      });
+      setClosedShiftByProducts((d.byProducts || []).map((p: any) => ({
+        name: p.name,
+        stationName: p.stationName ?? '',
+        category: p.category ?? '',
+        weight: p.weight,
+        stationId: p.stationId,
+      })));
+      setShowClosedReportsModal(false);
+      setShowShiftClosedView(true);
+    } catch (e) {
+      Alert.alert(t('common.error'), t('messages.failedToLoadShiftSummary'));
+    }
+  };
+
+  const openEditByProduct = (index: number) => {
+    // Support both closed shift view and start page saved by-products
+    const byProductsList = showShiftClosedView ? closedShiftByProducts : savedByProductsOnStartPage;
+    const p = byProductsList[index];
+    setEditingByProductIndex(index);
+    setEditByProductWeight(String(p?.weight ?? ''));
+  };
+
+  const saveEditedByProduct = async () => {
+    if (editingByProductIndex == null) return;
+    const w = Number(editByProductWeight);
+    if (Number.isNaN(w) || w < 0) {
+      Alert.alert(t('common.error'), t('messages.invalidWeight'));
+      return;
+    }
+    
+    if (!closedShiftId) return;
+    
+    // Get the current list and update it
+    const byProductsToUpdate = showShiftClosedView ? closedShiftByProducts : savedByProductsOnStartPage;
+    const updated = byProductsToUpdate.map((p, i) =>
+      i === editingByProductIndex ? { ...p, weight: w } : p
+    );
+    
+    // Update the appropriate list based on current view
+    if (showShiftClosedView) {
+      setClosedShiftByProducts(updated);
+    } else {
+      setSavedByProductsOnStartPage(updated);
+    }
+    
+    setEditingByProductIndex(null);
+    setEditByProductWeight('');
+    
+    try {
+      await productionApi.updateByProducts(
+        closedShiftId,
+        updated.map(p => ({ stationId: p.stationId, name: p.name, weight: p.weight, category: p.category ?? '' }))
+      );
+    } catch (e) {
+      Alert.alert(t('common.error'), t('messages.failedToSaveByProduct'));
+    }
+  };
+
+  const openEditLogWeight = (log: any) => {
+    setEditingLogWeight(log);
+    setEditWeightValue(String(log.weight || ''));
+  };
+
+  const saveEditedLogWeight = async () => {
+    if (!editingLogWeight) return;
+    const w = Number(editWeightValue);
+    if (Number.isNaN(w) || w < 0) {
+      Alert.alert(t('common.error'), t('messages.invalidWeight'));
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      await productionApi.updateLogWeight(editingLogWeight.id, w);
+      
+      // Update the log in the appropriate list
+      if (selectedStation?.name === 'Crusher') {
+        setCrusherLogs(prev => prev.map(log => 
+          log.id === editingLogWeight.id ? { ...log, weight: w } : log
+        ));
+      } else if (selectedStation?.name === 'Washing') {
+        setWashingLogs(prev => prev.map(log => 
+          log.id === editingLogWeight.id ? { ...log, weight: w } : log
+        ));
+      } else if (selectedStation?.name === 'Extrusion') {
+        setExtrusionLogs(prev => prev.map(log => 
+          log.id === editingLogWeight.id ? { ...log, weight: w } : log
+        ));
+      }
+      
+      // Also update in shiftLogs if present
+      setShiftLogs(prev => prev.map(log => 
+        log.id === editingLogWeight.id ? { ...log, weight: w } : log
+      ));
+
+      Alert.alert(t('common.success'), t('messages.weightUpdatedSuccessfully'));
+      setEditingLogWeight(null);
+      setEditWeightValue('');
+    } catch (error: any) {
+      Alert.alert(t('common.error'), error.response?.data?.message || t('messages.failedToUpdateWeight'));
     } finally {
       setIsLoading(false);
     }
@@ -519,6 +867,12 @@ const DashboardScreen = ({ navigation }: any) => {
     }
   }, [selectedSubLine, selectedDate, searchQuery, currentPage, selectedStation, selectedLineFilter, selectedStatusFilter, washingSelectedDate, washingSearchQuery, washingCurrentPage, washingSelectedLineFilter, washingSelectedStatusFilter, extrusionSelectedDate, extrusionSearchQuery, extrusionCurrentPage, extrusionSelectedLineFilter, extrusionSelectedStatusFilter]);
 
+  useEffect(() => {
+    if (showShiftClosedView && closedShiftId) {
+      fetchClosedShiftByProducts();
+    }
+  }, [showShiftClosedView, closedShiftId, fetchClosedShiftByProducts]);
+
   const handleStationSelect = (station: Station) => {
     setCurrentViewBags(0);
     setCurrentViewWeight(0);
@@ -530,8 +884,50 @@ const DashboardScreen = ({ navigation }: any) => {
   };
 
   const handleTakePhoto = async () => {
-    const result = await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], allowsEditing: true, aspect: [4, 3], quality: 0.7 });
-    if (!result.canceled) setCapturedImage(result.assets[0].uri);
+    if (hasPermission === false) {
+      Alert.alert(t('common.error'), t('messages.cameraPermissionRequired'));
+      return;
+    }
+    setShowCameraPreview(true);
+  };
+
+  const handleCapturePhoto = async () => {
+    if (cameraRef.current) {
+      try {
+        const photo = await cameraRef.current.takePictureAsync({
+          quality: 0.7,
+          base64: false,
+        });
+        if (photo) {
+          setTempCapturedImage(photo.uri);
+          setShowCameraPreview(false);
+          setShowPhotoPreview(true);
+        }
+      } catch (error) {
+        console.error('Error capturing photo:', error);
+        Alert.alert(t('common.error'), t('messages.failedToCapturePhoto'));
+      }
+    }
+  };
+
+  const handleAcceptPhoto = () => {
+    if (tempCapturedImage) {
+      setCapturedImages(prev => [...prev, tempCapturedImage]);
+      setShowPhotoPreview(false);
+      setTempCapturedImage(null);
+    }
+  };
+
+  const handleRetakePhoto = () => {
+    setTempCapturedImage(null);
+    setShowPhotoPreview(false);
+    setShowCameraPreview(true);
+  };
+
+  const handleCancelPhoto = () => {
+    setTempCapturedImage(null);
+    setShowPhotoPreview(false);
+    setShowCameraPreview(false);
   };
 
   const handleBarCodeScanned = async ({ data }: any) => {
@@ -550,23 +946,24 @@ const DashboardScreen = ({ navigation }: any) => {
         qrCode = data;
       }
 
-      // Validate the scanned QR code matches the expected batch type
+      // Validate the scanned QR code matches the expected batch type (same flow as search)
+      // Washing input: Crusher batches only. Extrusion input: Washing batches only.
       let targetStationId: number | undefined;
       let statusFilter: string | undefined;
       let expectedStationName: string = '';
 
-      if (selectedStation?.id === 3 || selectedStation?.name?.toLowerCase().includes('washing')) {
-        // Washing expects crusher batches (station_id = 2) with status pending
+      if (selectedSection === 'input' && (selectedStation?.id === 3 || selectedStation?.name?.toLowerCase().includes('washing'))) {
+        // Washing input: Crusher batches (station_id = 2) with status pending only
         targetStationId = 2;
         statusFilter = 'pending';
         expectedStationName = 'crusher';
-      } else if (selectedStation?.id === 4 || selectedStation?.name?.toLowerCase().includes('extrusion')) {
-        // Extrusion expects washing batches (station_id = 3) with status pending
+      } else if (selectedSection === 'input' && (selectedStation?.id === 4 || selectedStation?.name?.toLowerCase().includes('extrusion'))) {
+        // Extrusion input: Washing batches (station_id = 3) with status pending only – same flow as Crusher→Washing
         targetStationId = 3;
         statusFilter = 'pending';
         expectedStationName = 'washing';
-      } else if (selectedStation?.id === 5 || selectedStation?.name?.toLowerCase().includes('final') || selectedStation?.name?.toLowerCase().includes('packing')) {
-        // Final Packaging expects extrusion batches with status pending only
+      } else if (selectedSection === 'input' && (selectedStation?.id === 5 || selectedStation?.name?.toLowerCase().includes('final') || selectedStation?.name?.toLowerCase().includes('packing'))) {
+        // Final Packaging input: Extrusion batches (station_id = 4) with status pending only – same flow as Crusher→Washing, Washing→Extrusion
         const extStation = stations.find((s: Station) => s.name?.toLowerCase().includes('extrusion') || s.id === 4);
         targetStationId = extStation?.id ?? 4;
         statusFilter = 'pending';
@@ -577,7 +974,7 @@ const DashboardScreen = ({ navigation }: any) => {
       if (targetStationId && statusFilter) {
         const response = await productionApi.searchLogs(qrCode, targetStationId, selectedStation?.id, statusFilter);
         if (response.data.success && response.data.data.length > 0) {
-          // Found matching batch - use the data from the API
+          // Found matching batch - show batch no., user taps Save to process (same as manual search)
           const matchedBatch = response.data.data[0];
           setSelectedInputBag({ 
             output_bag_qr: matchedBatch.output_bag_qr, 
@@ -585,7 +982,7 @@ const DashboardScreen = ({ navigation }: any) => {
           });
           setShowScanner(false); // Close scanner only on success
         } else {
-          // QR code doesn't match expected batch type
+          // QR code doesn't match expected batch type (e.g. not a Crusher batch for Washing)
           Alert.alert(
             'Invalid Batch', 
             `This QR code is not a valid ${expectedStationName} batch with pending status. Please scan a ${expectedStationName} batch QR code.`
@@ -599,7 +996,7 @@ const DashboardScreen = ({ navigation }: any) => {
       }
     } catch (error) {
       console.error('Scan validation error:', error);
-      Alert.alert('Error', 'Failed to validate scanned QR code. Please try again.');
+      Alert.alert(t('common.error'), t('messages.failedToValidate'));
       setScanned(false); // Allow scanning again
     }
   };
@@ -619,13 +1016,14 @@ const DashboardScreen = ({ navigation }: any) => {
           qrCode: qrCode,
           weight: weightInput,
           station: stationDisplay,
-          subLine: selectedSubLine,
+          line: selectedSubLine || selectedStation.name,
           date: new Date().toLocaleDateString()
         });
+        setPreviewBagStatus((selectedStation.id === 2 || selectedStation.id === 3 || selectedStation.id === 4) ? 'pending' : 'Completed');
         setShowPrintPreview(true);
       }
     } catch (error) {
-      Alert.alert('Error', 'Failed to generate QR preview');
+      Alert.alert(t('common.error'), t('messages.failedToGenerateQR'));
     } finally {
       setIsLoading(false);
     }
@@ -635,8 +1033,11 @@ const DashboardScreen = ({ navigation }: any) => {
     if (!previewData || !backendShiftId || !selectedStation) return;
     try {
       setIsLoading(true);
-      // Set status to 'pending' for crusher, washing, and extrusion entries, 'Completed' for others
-      const status = (selectedStation.id === 2 || selectedStation.id === 3 || selectedStation.id === 4) ? 'pending' : 'Completed';
+      // Worker-selected status: pending = temporary jumbo bag, Completed = final jumbo bag
+      const status = previewBagStatus;
+      // Send photos as comma-separated string (or first photo if only one)
+      const photoUrl = capturedImages.length > 0 ? capturedImages.join(',') : null;
+      
       const response = await productionApi.logProduction({
         shiftId: backendShiftId,
         stationId: selectedStation.id,
@@ -644,7 +1045,9 @@ const DashboardScreen = ({ navigation }: any) => {
         outputBagQr: previewData.qrCode,
         weight: parseFloat(weightInput),
         status: status,
-        subLine: selectedSubLine || undefined
+        subLine: selectedSubLine || undefined,
+        photoUrl: photoUrl,
+        remark: remarkInput.trim() || undefined
       });
       if (response.data.success) {
         const savedLog = response.data.data;
@@ -672,10 +1075,12 @@ const DashboardScreen = ({ navigation }: any) => {
 
         setIsCurrentLogSaved(true); // Mark as saved
         setWeightInput(''); // Clear input field immediately after save
-        Alert.alert('Success', 'Production log saved successfully');
+        setRemarkInput('');
+        setCapturedImages([]); // Clear photos after saving
+        Alert.alert(t('common.success'), t('messages.productionLogSaved'));
       }
     } catch (error) {
-      Alert.alert('Error', 'Failed to save production log');
+      Alert.alert(t('common.error'), t('messages.failedToSaveProductionLog'));
     } finally {
       setIsLoading(false);
     }
@@ -685,20 +1090,23 @@ const DashboardScreen = ({ navigation }: any) => {
     setShowPrintPreview(false);
     setIsCurrentLogSaved(false);
     setWeightInput('');
+    setRemarkInput('');
+    setPreviewBagStatus('pending');
     setSelectedInputBag(null);
-    setCapturedImage(null);
+    setCapturedImages([]);
     // Keep user on station
   };
 
   const handleBack = () => {
+    if (showShiftClosedView) {
+      handleBackToShifts();
+      return;
+    }
     if ((selectedStation?.name === 'Crusher' || selectedStation?.name === 'Washing') && selectedSubLine) {
       if (selectedSection) {
-        // If in input/output section, go back to washing line selection
         setSelectedSection(null);
-        // Also clear selectedSubLine to show the washing line selection screen
         setSelectedSubLine(null);
       } else {
-        // If no section selected but subLine is set, clear subLine to show selection screen
         setSelectedSubLine(null);
       }
     } else {
@@ -721,7 +1129,7 @@ const DashboardScreen = ({ navigation }: any) => {
       const success = await printService.printQRLabel(printData);
       if (success) { setShowPrintPreview(false); setSelectedStation(null); }
     } catch (error) {
-      Alert.alert('Print Error', 'Could not print');
+      Alert.alert(t('common.error'), t('messages.printError'));
     } finally {
           setIsPrinting(false);
     }
@@ -746,6 +1154,9 @@ const DashboardScreen = ({ navigation }: any) => {
           // Extrusion: "Extrusion-E1", "Extrusion-E2", or "Extrusion-E3"
           const lineNumber = selectedLogForPrint.sub_line.replace('Extrusion ', '');
           stationDisplay = `Extrusion-E${lineNumber}`;
+        } else if (selectedLogForPrint.sub_line === 'Mixture') {
+          // Mixture: "Extrusion-MIX"
+          stationDisplay = 'Extrusion-MIX';
         } else {
           // Crusher: "Crusher-3E" or "Crusher-Rapid"
           stationDisplay = `Crusher-${selectedLogForPrint.sub_line}`;
@@ -759,13 +1170,14 @@ const DashboardScreen = ({ navigation }: any) => {
         qrCode: selectedLogForPrint.output_bag_qr,
         weight: selectedLogForPrint.weight,
         station: stationDisplay,
+        line: selectedLogForPrint.sub_line || selectedStation?.name || 'N/A',
         date: new Date(selectedLogForPrint.created_at).toLocaleDateString(),
         qrImage: qrBase64
       };
       const success = await printService.printQRLabel(printData);
       if (success) { setShowListPrintPreview(false); setSelectedLogForPrint(null); }
     } catch (error) {
-      Alert.alert('Print Error', 'Could not print');
+      Alert.alert(t('common.error'), t('messages.printError'));
     } finally {
       setIsPrinting(false);
     }
@@ -888,8 +1300,14 @@ const DashboardScreen = ({ navigation }: any) => {
     <SafeAreaView style={styles.container} edges={Platform.OS === 'web' ? [] : ['top', 'bottom']}>
       <View style={styles.header}>
         <View style={styles.headerLeft}>
-          {!selectedStation && !showEndShiftSummary ? (
-              <TouchableOpacity onPress={() => navigation.navigate('ShiftSelection')} style={styles.headerPill}>
+          {!selectedStation && !showEndShiftSummary && !showShiftClosedView ? (
+              <TouchableOpacity onPress={() => {
+                // Clear saved by-products when navigating to shift selection
+                setSavedByProductsOnStartPage([]);
+                setSavedByProductsMeta(null);
+                setClosedShiftId(null);
+                navigation.navigate('ShiftSelection');
+              }} style={styles.headerPill}>
                 <Text style={styles.pillLabel}>Shift</Text>
                 <Text style={styles.pillValue}>{selectedShift?.name || 'Shift 1'}</Text>
               </TouchableOpacity>
@@ -898,9 +1316,9 @@ const DashboardScreen = ({ navigation }: any) => {
               <ArrowLeft color="#333" size={24} />
               <View style={{ marginLeft: 10 }}>
                 <Text style={styles.stationTitle}>
-                  {showEndShiftSummary ? 'End Shift' : (selectedStation?.name === 'Washing' ? selectedStation?.name : (selectedSubLine ? `${selectedStation?.name} (${selectedSubLine})` : selectedStation?.name))}
+                  {showShiftClosedView ? 'Shift closed' : showEndShiftSummary ? 'End Shift' : (selectedStation?.name === 'Washing' ? selectedStation?.name : (selectedSubLine ? `${selectedStation?.name} (${selectedSubLine})` : selectedStation?.name))}
                 </Text>
-                {!showEndShiftSummary && <View style={styles.contextPills}><Text style={styles.smallPill}>{selectedShift?.name}</Text></View>}
+                {!showEndShiftSummary && !showShiftClosedView && <View style={styles.contextPills}><Text style={styles.smallPill}>{selectedShift?.name}</Text></View>}
               </View>
             </TouchableOpacity>
           )}
@@ -932,48 +1350,247 @@ const DashboardScreen = ({ navigation }: any) => {
         decelerationRate="normal"
         pagingEnabled={false}
         scrollsToTop={true}>
-        {showEndShiftSummary ? (
+        {showShiftClosedView ? (
           <View style={styles.summaryContainer}>
             <View style={styles.summaryStatsCard}>
-              <Text style={styles.cardTitle}>Shift Summary</Text>
+              <Text style={styles.cardTitle}>{t('dashboard.shiftClosedSuccessfully')}</Text>
+              {closedShiftMeta?.remark ? (
+                <View style={{ marginTop: 8, paddingVertical: 6, paddingHorizontal: 10, backgroundColor: '#f1f5f9', borderRadius: 8 }}>
+                  <Text style={{ fontSize: 11, color: '#64748b', marginBottom: 2 }}>{t('dashboard.remark')}</Text>
+                  <Text style={{ fontSize: 13, color: '#334155' }}>{closedShiftMeta.remark}</Text>
+                </View>
+              ) : null}
+              <Text style={[styles.sectionTitle, { marginTop: 12 }]}>{t('dashboard.savedByProducts')}</Text>
+              <Text style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>{t('dashboard.tapEditToChangeAgain')}</Text>
+              {closedByProductsLoading ? (
+                <View style={{ marginVertical: 24, alignItems: 'center' }}><ActivityIndicator color="#333" /></View>
+              ) : closedShiftByProducts.length === 0 ? (
+                <Text style={{ fontSize: 14, color: '#666', marginVertical: 16 }}>{t('dashboard.noByProducts')}</Text>
+              ) : (
+                closedShiftByProducts.map((item, index) => (
+                  <View key={index} style={[styles.byProductRow, { marginBottom: 8 }]}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.byProductName}>{item.name}</Text>
+                      <Text style={styles.byProductStation}>{item.stationName} — {item.category}</Text>
+                    </View>
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <Text style={[styles.byProductName, { marginRight: 12 }]}>{item.weight} kg</Text>
+                      <TouchableOpacity onPress={() => openEditByProduct(index)} style={styles.editByProductBtn} accessibilityLabel="Edit weight">
+                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                          <Pencil color="#0ea5e9" size={16} />
+                          <Text style={{ fontSize: 14, fontWeight: '600', color: '#0ea5e9', marginLeft: 4 }}>{t('common.edit')}</Text>
+                        </View>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ))
+              )}
+              {closedShiftMeta?.waste && closedShiftMeta.waste.length > 0 ? (
+                <>
+                  <Text style={[styles.sectionTitle, { marginTop: 16 }]}>{t('dashboard.wasteFromMachines')}</Text>
+                  <View style={{ marginTop: 8 }}>
+                    {(['Crusher', 'Washing', 'Extrusion'] as const).map((machineName) => {
+                      const items = closedShiftMeta.waste!.filter(w => w.stationName === machineName);
+                      if (items.length === 0) return null;
+                      const bySub = items.reduce((acc: Record<string, typeof items>, w) => {
+                        const k = w.subLine || '-';
+                        if (!acc[k]) acc[k] = [];
+                        acc[k].push(w);
+                        return acc;
+                      }, {});
+                      return (
+                        <View key={machineName} style={{ marginBottom: 12 }}>
+                          <Text style={{ fontSize: 13, fontWeight: '700', color: '#334155', marginBottom: 4 }}>{machineName}</Text>
+                          {Object.entries(bySub).map(([subLine, rows]) => (
+                            <View key={subLine} style={{ marginLeft: 8, marginBottom: 6 }}>
+                              <Text style={{ fontSize: 12, fontWeight: '600', color: '#64748b' }}>{subLine}</Text>
+                              {rows.map((r, i) => (
+                                <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 2 }}>
+                                  <Text style={{ fontSize: 12, color: '#475569' }}>{r.wasteType}</Text>
+                                  <Text style={{ fontSize: 12, fontWeight: '600' }}>{r.weight} kg</Text>
+                                </View>
+                              ))}
+                            </View>
+                          ))}
+                        </View>
+                      );
+                    })}
+                  </View>
+                </>
+              ) : null}
+            </View>
+            <View style={{ flexDirection: 'row', marginTop: 16, marginBottom: 24 }}>
+              <TouchableOpacity style={[styles.closeShiftBtn, { flex: 1, marginRight: 6 }]} onPress={handleGeneratePdfAgain}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
+                  <FileText color="#FFF" size={20} />
+                  <Text style={[styles.closeShiftText, { marginLeft: 8 }]}>Generate PDF</Text>
+                </View>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.closeShiftBtn, { flex: 1, backgroundColor: '#0ea5e9', marginLeft: 6 }]} onPress={handleBackToShifts}>
+                <Text style={styles.closeShiftText}>{t('dashboard.backToShifts')}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        ) : showEndShiftSummary ? (
+          <View style={styles.summaryContainer}>
+            <View style={styles.summaryStatsCard}>
+              <Text style={styles.cardTitle}>{t('dashboard.shiftSummary')}</Text>
               <View style={styles.summaryGrid}>
-                <View style={styles.summaryItem}><Text style={styles.summaryValue}>{shiftDuration}</Text><Text style={styles.summaryLabel}>Duration</Text></View>
-                <View style={styles.summaryItem}>
-                  <Text style={styles.summaryValue}>
-                    {(() => {
-                      const extrusionStation = stations.find(s => s.name?.toLowerCase().includes('extrusion') || s.id === 4);
-                      if (!extrusionStation) return 0;
-                      return shiftLogs.filter((l: any) => l.station_id === extrusionStation.id).length;
-                    })()}
-                  </Text>
-                  <Text style={styles.summaryLabel}>Total Outputs</Text>
-                </View>
-                </View>
-                </View>
-            <Text style={styles.sectionTitle}>BY-PRODUCTS (OPTIONAL)</Text>
+                <View style={styles.summaryItem}><Text style={styles.summaryValue}>{shiftDuration}</Text><Text style={styles.summaryLabel}>{t('dashboard.duration')}</Text></View>
+                {(() => {
+                  const crusherSt = stations.find(s => s.name?.toLowerCase().includes('crusher') || (s as any).code === 'CRS');
+                  const washingSt = stations.find(s => s.name?.toLowerCase().includes('washing') || (s as any).code === 'WSH');
+                  const extrusionSt = stations.find(s => s.name?.toLowerCase().includes('extrusion') || s.id === 4 || (s as any).code === 'EXT');
+                  const co = crusherSt ? shiftLogs.filter((l: any) => l.station_id === crusherSt.id).length : 0;
+                  const wo = washingSt ? shiftLogs.filter((l: any) => l.station_id === washingSt.id).length : 0;
+                  const eo = extrusionSt ? shiftLogs.filter((l: any) => l.station_id === extrusionSt.id).length : 0;
+                  const cw = crusherSt ? shiftLogs.filter((l: any) => l.station_id === crusherSt.id).reduce((a: number, l: any) => a + Number(l.weight || 0), 0).toFixed(1) : '0.0';
+                  const ww = washingSt ? shiftLogs.filter((l: any) => l.station_id === washingSt.id).reduce((a: number, l: any) => a + Number(l.weight || 0), 0).toFixed(1) : '0.0';
+                  const ew = extrusionSt ? shiftLogs.filter((l: any) => l.station_id === extrusionSt.id).reduce((a: number, l: any) => a + Number(l.weight || 0), 0).toFixed(1) : '0.0';
+                  const totalO = co + wo + eo;
+                  const totalW = (Number(cw) + Number(ww) + Number(ew)).toFixed(1);
+                  return (
+                    <>
+                      <View style={styles.summaryItem}><Text style={styles.summaryValue}>{co}</Text><Text style={styles.summaryLabel}>{t('print.crusher')} {t('dashboard.totalOutputs')}</Text></View>
+                      <View style={styles.summaryItem}><Text style={styles.summaryValue}>{wo}</Text><Text style={styles.summaryLabel}>{t('print.washing')} {t('dashboard.totalOutputs')}</Text></View>
+                      <View style={styles.summaryItem}><Text style={styles.summaryValue}>{eo}</Text><Text style={styles.summaryLabel}>{t('print.extrusion')} {t('dashboard.totalOutputs')}</Text></View>
+                      <View style={styles.summaryItem}><Text style={styles.summaryValue}>{totalO}</Text><Text style={styles.summaryLabel}>{t('print.total')} {t('dashboard.totalOutputs')}</Text></View>
+                      <View style={styles.summaryItem}><Text style={styles.summaryValue}>{cw} kg</Text><Text style={styles.summaryLabel}>{t('print.crusher')} {t('dashboard.totalKg')}</Text></View>
+                      <View style={styles.summaryItem}><Text style={styles.summaryValue}>{ww} kg</Text><Text style={styles.summaryLabel}>{t('print.washing')} {t('dashboard.totalKg')}</Text></View>
+                      <View style={styles.summaryItem}><Text style={styles.summaryValue}>{ew} kg</Text><Text style={styles.summaryLabel}>{t('print.extrusion')} {t('dashboard.totalKg')}</Text></View>
+                      <View style={styles.summaryItem}><Text style={styles.summaryValue}>{totalW} kg</Text><Text style={styles.summaryLabel}>{t('print.total')} {t('dashboard.totalKg')}</Text></View>
+                    </>
+                  );
+                })()}
+              </View>
+            </View>
+            <Text style={styles.sectionTitle}>{t('dashboard.byProductsOptional')}</Text>
             {byProductsInputs.map((item, index) => (
               <View key={index} style={styles.byProductRow}>
                 <View style={{ flex: 1 }}><Text style={styles.byProductName}>{item.name}</Text><Text style={styles.byProductStation}>{item.stationName} - {item.category}</Text></View>
                 <View style={styles.byProductInputWrapper}>
-                  <TextInput style={styles.byProductInput} keyboardType="numeric" value={item.weight.toString()} onChangeText={(val) => { const n = [...byProductsInputs]; n[index].weight = val; setByProductsInputs(n); }} />
+                  <TextInput
+                    style={styles.byProductInput}
+                    keyboardType="decimal-pad"
+                    value={typeof item.weight === 'number' ? (item.weight === 0 ? '' : String(item.weight)) : String(item.weight ?? '')}
+                    onChangeText={(val) => {
+                      const next = byProductsInputs.map((p, i) =>
+                        i === index ? { ...p, weight: val } : p
+                      );
+                      setByProductsInputs(next);
+                    }}
+                  />
                   <Text style={styles.unitLabel}>kg</Text>
                 </View>
               </View>
             ))}
-            <TouchableOpacity style={styles.closeShiftBtn} onPress={handleCloseShift} disabled={isLoading}>{isLoading ? <ActivityIndicator color="#FFF" /> : <Text style={styles.closeShiftText}>Close Shift</Text>}</TouchableOpacity>
+            <Text style={[styles.sectionTitle, { marginTop: 20 }]}>{t('dashboard.wasteOptional')}</Text>
+            <Text style={{ fontSize: 12, color: '#64748b', marginBottom: 12 }}>{t('dashboard.wasteFromMachines')}</Text>
+            {(['crusher', 'washing', 'extrusion'] as const).map((stationKey) => {
+              const subLines = WASTE_CONFIG[stationKey].subLines;
+              const machineLabel = stationKey === 'crusher' ? t('print.crusher') : stationKey === 'washing' ? t('print.washing') : t('print.extrusion');
+              return (
+                <View key={stationKey} style={{ marginBottom: 16 }}>
+                  <Text style={{ fontSize: 14, fontWeight: '700', color: '#334155', marginBottom: 8 }}>{machineLabel}</Text>
+                  {subLines.map((subLine) => {
+                    const items = wasteInputs.filter(w => w.stationKey === stationKey && w.subLine === subLine);
+                    if (items.length === 0) return null;
+                    return (
+                      <View key={subLine} style={{ marginLeft: 8, marginBottom: 10 }}>
+                        <Text style={{ fontSize: 12, fontWeight: '600', color: '#64748b', marginBottom: 6 }}>{subLine}</Text>
+                        {items.map((item, idx) => {
+                          const globalIndex = wasteInputs.findIndex(w => w === item);
+                          const wasteLabel = item.wasteType === 'Dust Remove Label' ? t('dashboard.wasteDustRemoveLabel') : item.wasteType === 'Sweep Floor' ? t('dashboard.wasteSweepFloor') : item.wasteType === 'Dust wet' ? t('dashboard.wasteDustWet') : item.wasteType === 'Lumps' ? t('dashboard.wasteLumps') : item.wasteType;
+                          return (
+                            <View key={idx} style={[styles.byProductRow, { marginBottom: 6 }]}>
+                              <Text style={[styles.byProductName, { flex: 1, fontSize: 13 }]}>{wasteLabel}</Text>
+                              <View style={styles.byProductInputWrapper}>
+                                <TextInput
+                                  style={styles.byProductInput}
+                                  keyboardType="decimal-pad"
+                                  value={item.weight}
+                                  onChangeText={(val) => {
+                                    const next = wasteInputs.map((w, i) => i === globalIndex ? { ...w, weight: val } : w);
+                                    setWasteInputs(next);
+                                  }}
+                                />
+                                <Text style={styles.unitLabel}>kg</Text>
+                              </View>
+                            </View>
+                          );
+                        })}
+                      </View>
+                    );
+                  })}
+                </View>
+              );
+            })}
+            <View style={[styles.inputGroup, { marginTop: 12 }]}>
+              <Text style={styles.label}>{t('dashboard.remark')}</Text>
+              <TextInput
+                style={[styles.input, { minHeight: 44 }]}
+                placeholder={t('dashboard.remarkPlaceholder')}
+                placeholderTextColor="#94a3b8"
+                value={endShiftRemark}
+                onChangeText={setEndShiftRemark}
+                multiline
+                numberOfLines={2}
+              />
+            </View>
+            <Text style={styles.afterCloseHint}>{t('dashboard.afterCloseHint')}</Text>
+            <TouchableOpacity style={styles.closeShiftBtn} onPress={handleCloseShift} disabled={isLoading}>{isLoading ? <ActivityIndicator color="#FFF" /> : <Text style={styles.closeShiftText}>{t('dashboard.closeShift')}</Text>}</TouchableOpacity>
           </View>
         ) : !isShiftActive ? (
           <View style={styles.startShiftContainer}>
             <TouchableOpacity style={styles.startShiftCard} onPress={handleStartShift}>
               <View style={styles.playIconCircle}><Play fill="#FFF" color="#FFF" size={24} /></View>
-              <View style={styles.startShiftText}><Text style={styles.startShiftTitle}>Start Shift</Text><Text style={styles.startShiftSubtitle}>Tap to begin working</Text></View>
+              <View style={styles.startShiftText}><Text style={styles.startShiftTitle}>{t('dashboard.startShift')}</Text><Text style={styles.startShiftSubtitle}>{t('dashboard.tapToBegin')}</Text></View>
               <ChevronRight color="#FFF" size={24} />
             </TouchableOpacity>
+
+            {user?.role?.toLowerCase() === 'ppic' && (
+              <TouchableOpacity style={[styles.closeShiftBtn, { marginTop: 16, backgroundColor: '#0ea5e9' }]} onPress={handleOpenClosedReports}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
+                  <FileText color="#FFF" size={20} />
+                  <Text style={[styles.closeShiftText, { marginLeft: 8 }]}>{t('dashboard.viewEditClosedReports')}</Text>
+                </View>
+              </TouchableOpacity>
+            )}
+            
+            {savedByProductsOnStartPage.length > 0 && (
+              <View style={styles.summaryStatsCard}>
+                <Text style={styles.cardTitle}>{t('dashboard.savedByProducts')}</Text>
+                <Text style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>{t('dashboard.tapEditToChange')}</Text>
+                {savedByProductsOnStartPage.map((item, index) => (
+                  <View key={index} style={[styles.byProductRow, { marginBottom: 8 }]}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.byProductName}>{item.name}</Text>
+                      <Text style={styles.byProductStation}>{item.stationName} — {item.category}</Text>
+                    </View>
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <Text style={[styles.byProductName, { marginRight: 12 }]}>{item.weight} kg</Text>
+                      <TouchableOpacity onPress={() => openEditByProduct(index)} style={styles.editByProductBtn} accessibilityLabel="Edit weight">
+                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                          <Pencil color="#0ea5e9" size={16} />
+                          <Text style={{ fontSize: 14, fontWeight: '600', color: '#0ea5e9', marginLeft: 4 }}>{t('common.edit')}</Text>
+                        </View>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ))}
+                <TouchableOpacity style={[styles.closeShiftBtn, { marginTop: 16 }]} onPress={handleGeneratePdfAgain}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
+                    <FileText color="#FFF" size={20} />
+                    <Text style={[styles.closeShiftText, { marginLeft: 8 }]}>{t('dashboard.generatePDF')}</Text>
+                  </View>
+                </TouchableOpacity>
+              </View>
+            )}
           </View>
         ) : !selectedStation ? (
           <View style={styles.dashboardGrid}>
             <View style={styles.statusRow}>
-              <View style={styles.activeStatus}><View style={styles.statusDot} /><Text style={styles.statusText}>Shift Active</Text></View>
+              <View style={styles.activeStatus}><View style={styles.statusDot} /><Text style={styles.statusText}>{t('dashboard.shiftActive')}</Text></View>
                 <Text style={styles.durationText}>{shiftDuration}</Text>
               </View>
             <View style={styles.statsRow}>
@@ -1000,7 +1617,7 @@ const DashboardScreen = ({ navigation }: any) => {
                 <Text style={styles.statLabel}>Total kg</Text>
               </View>
               </View>
-            <Text style={styles.sectionTitle}>SELECT STATION</Text>
+            <Text style={styles.sectionTitle}>{t('dashboard.selectStation')}</Text>
             {stations.map((s) => (
               <TouchableOpacity key={s.id} style={styles.stationCard} onPress={() => handleStationSelect(s)}>
                 <View style={[styles.stationIconBox, { backgroundColor: s.color }]}>{renderStationIcon(s.name, s.color)}</View>
@@ -1009,7 +1626,7 @@ const DashboardScreen = ({ navigation }: any) => {
                 <ChevronRight color="#CCC" size={20} />
               </TouchableOpacity>
             ))}
-            <TouchableOpacity style={styles.endShiftButton} onPress={handleEndShift}><Square color="#FFF" size={20} /><Text style={styles.endShiftText}>Close Shift</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.endShiftButton} onPress={handleEndShift}><Square color="#FFF" size={20} /><Text style={styles.endShiftText}>{t('dashboard.closeShift')}</Text></TouchableOpacity>
           </View>
         ) : (
           <View style={styles.detailContainer}>
@@ -1056,7 +1673,7 @@ const DashboardScreen = ({ navigation }: any) => {
                       <View style={[styles.selectionIconBox, { backgroundColor: '#3b82f6' }]}><Package color="#FFF" size={28} /></View>
                       <View style={styles.selectionText}>
                         <Text style={styles.selectionCardTitle}>3E</Text>
-                        <Text style={styles.selectionCardSub}>Primary Crusher Line</Text>
+                        <Text style={styles.selectionCardSub}>{t('dashboard.primaryCrusherLine')}</Text>
                     </View>
                       <ChevronRight color="#CCC" size={24} />
                     </TouchableOpacity>
@@ -1064,7 +1681,15 @@ const DashboardScreen = ({ navigation }: any) => {
                       <View style={[styles.selectionIconBox, { backgroundColor: '#a855f7' }]}><Zap color="#FFF" size={28} /></View>
                       <View style={styles.selectionText}>
                         <Text style={styles.selectionCardTitle}>Rapid</Text>
-                        <Text style={styles.selectionCardSub}>Fast Processing Line</Text>
+                        <Text style={styles.selectionCardSub}>{t('dashboard.fastProcessingLine')}</Text>
+                  </View>
+                      <ChevronRight color="#CCC" size={24} />
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.selectionCard} onPress={() => setSelectedSubLine('Betty')}>
+                      <View style={[styles.selectionIconBox, { backgroundColor: '#10b981' }]}><Box color="#FFF" size={28} /></View>
+                      <View style={styles.selectionText}>
+                        <Text style={styles.selectionCardTitle}>Betty</Text>
+                        <Text style={styles.selectionCardSub}>{t('dashboard.bettyMachineLine')}</Text>
                   </View>
                       <ChevronRight color="#CCC" size={24} />
                     </TouchableOpacity>
@@ -1075,19 +1700,16 @@ const DashboardScreen = ({ navigation }: any) => {
                         <Text style={styles.logsTitle}>Recent Entries</Text>
                 </View>
 
-                      {/* Inline Date Picker */}
+                      {/* Date Picker */}
                       <View style={styles.datePickerContainer}>
                         <Text style={styles.datePickerLabel}>Select Date:</Text>
-                        <InlineDatePicker
-                          value={datePickerDate}
+                        <StationDatePicker
+                          value={parseDateLocal(selectedDate)}
                           onChange={(date) => {
-                            // Always update with the new date - user explicitly selected it
-                            const dateStr = date.toISOString().split('T')[0];
-                            setDatePickerDate(date);
-                            setSelectedDate(dateStr);
+                            setSelectedDate(formatDateLocal(date));
                             setCurrentPage(1);
                           }}
-                          maximumDate={new Date()}
+                          maximumDate={maxDate}
                         />
                   </View>
                   
@@ -1138,6 +1760,12 @@ const DashboardScreen = ({ navigation }: any) => {
                               onPress={() => { setSelectedLineFilter('Rapid'); setCurrentPage(1); }}
                             >
                               <Text style={[styles.filterButtonText, selectedLineFilter === 'Rapid' && styles.filterButtonTextActive]}>Rapid</Text>
+                      </TouchableOpacity>
+                            <TouchableOpacity
+                              style={[styles.filterButton, selectedLineFilter === 'Betty' && styles.filterButtonActive]}
+                              onPress={() => { setSelectedLineFilter('Betty'); setCurrentPage(1); }}
+                            >
+                              <Text style={[styles.filterButtonText, selectedLineFilter === 'Betty' && styles.filterButtonTextActive]}>Betty</Text>
                       </TouchableOpacity>
                     </View>
                         </View>
@@ -1192,19 +1820,31 @@ const DashboardScreen = ({ navigation }: any) => {
                   </View>
                 </View>
                               <View style={styles.logActions}>
-                              {log.status === 'pending' && (
-                                <TouchableOpacity
-                                  style={styles.printIconButton}
-                                  onPress={() => {
-                                    setSelectedLogForPrint(log);
-                                    setShowListPrintPreview(true);
-                                  }}
-                                >
-                                  <PrinterIcon color="#17a34a" size={20} />
-                                </TouchableOpacity>
-                              )}
-                                <View style={[styles.logBadge, { backgroundColor: log.sub_line === '3E' ? '#EBF5FF' : '#F5F3FF' }]}>
-                                  <Text style={[styles.logBadgeText, { color: log.sub_line === '3E' ? '#2563eb' : '#7c3aed' }]}>{log.sub_line}</Text>
+                                {user?.role?.toLowerCase() === 'ppic' && (
+                                  <TouchableOpacity
+                                    style={styles.editIconButton}
+                                    onPress={() => openEditLogWeight(log)}
+                                  >
+                                    <Pencil color="#0ea5e9" size={18} />
+                                  </TouchableOpacity>
+                                )}
+                                {log.status === 'pending' && (
+                                  <TouchableOpacity
+                                    style={styles.printIconButton}
+                                    onPress={() => {
+                                      setSelectedLogForPrint(log);
+                                      setShowListPrintPreview(true);
+                                    }}
+                                  >
+                                    <PrinterIcon color="#17a34a" size={20} />
+                                  </TouchableOpacity>
+                                )}
+                                <View style={[styles.logBadge, { 
+                                  backgroundColor: log.sub_line === '3E' ? '#EBF5FF' : log.sub_line === 'Rapid' ? '#F5F3FF' : '#D1FAE5',
+                                }]}>
+                                  <Text style={[styles.logBadgeText, { 
+                                    color: log.sub_line === '3E' ? '#2563eb' : log.sub_line === 'Rapid' ? '#7c3aed' : '#059669'
+                                  }]}>{log.sub_line}</Text>
                                 </View>
                               </View>
                             </View>
@@ -1242,8 +1882,13 @@ const DashboardScreen = ({ navigation }: any) => {
                   ) : (
                   <>
                     <View style={styles.sublineBadgeWrapper}>
-                      <View style={[styles.sublineBadge, { backgroundColor: selectedSubLine === '3E' ? '#EBF5FF' : '#F5F3FF', borderColor: selectedSubLine === '3E' ? '#bfdbfe' : '#ddd6fe' }]}>
-                        <Text style={[styles.sublineBadgeText, { color: selectedSubLine === '3E' ? '#2563eb' : '#7c3aed' }]}>Working on: {selectedSubLine} Line</Text>
+                      <View style={[styles.sublineBadge, { 
+                        backgroundColor: selectedSubLine === '3E' ? '#EBF5FF' : selectedSubLine === 'Rapid' ? '#F5F3FF' : '#D1FAE5',
+                        borderColor: selectedSubLine === '3E' ? '#bfdbfe' : selectedSubLine === 'Rapid' ? '#ddd6fe' : '#a7f3d0'
+                      }]}>
+                        <Text style={[styles.sublineBadgeText, { 
+                          color: selectedSubLine === '3E' ? '#2563eb' : selectedSubLine === 'Rapid' ? '#7c3aed' : '#059669'
+                        }]}>Working on: {selectedSubLine} Line</Text>
                       </View>
                     </View>
 
@@ -1290,6 +1935,29 @@ const DashboardScreen = ({ navigation }: any) => {
                         <CameraIcon size={20} color="#475569" />
                         <Text style={styles.secondaryButtonText}>Take Photo</Text>
                   </TouchableOpacity>
+
+                  {capturedImages.length > 0 && (
+                    <ScrollView 
+                      horizontal 
+                      showsHorizontalScrollIndicator={false}
+                      style={styles.photosPreviewContainer}
+                      contentContainerStyle={styles.photosPreviewContent}
+                    >
+                      {capturedImages.map((imageUri, index) => (
+                        <View key={index} style={styles.photoPreviewItem}>
+                          <Image source={{ uri: imageUri }} style={styles.photoPreviewThumbnail} />
+                          <TouchableOpacity 
+                            style={styles.removePhotoButton} 
+                            onPress={() => {
+                              setCapturedImages(prev => prev.filter((_, i) => i !== index));
+                            }}
+                          >
+                            <X size={16} color="#FFF" />
+                          </TouchableOpacity>
+                        </View>
+                      ))}
+                    </ScrollView>
+                  )}
 
                       <TouchableOpacity 
                         style={[styles.primaryButton, (!weightInput || isLoading) && { opacity: 0.5, backgroundColor: '#E2E8F0' }]}
@@ -1358,18 +2026,16 @@ const DashboardScreen = ({ navigation }: any) => {
                       <Text style={styles.logsTitle}>Recent Entries</Text>
                     </View>
 
-                    {/* Inline Date Picker */}
+                    {/* Date Picker */}
                     <View style={styles.datePickerContainer}>
                       <Text style={styles.datePickerLabel}>Select Date:</Text>
-                      <InlineDatePicker
-                        value={washingDatePickerDate}
+                      <StationDatePicker
+                        value={parseDateLocal(washingSelectedDate)}
                         onChange={(date) => {
-                          const dateStr = date.toISOString().split('T')[0];
-                          setWashingDatePickerDate(date);
-                          setWashingSelectedDate(dateStr);
+                          setWashingSelectedDate(formatDateLocal(date));
                           setWashingCurrentPage(1);
                         }}
-                        maximumDate={new Date()}
+                        maximumDate={maxDate}
                       />
                     </View>
                     
@@ -1480,9 +2146,17 @@ const DashboardScreen = ({ navigation }: any) => {
                               </View>
                             </View>
                             <View style={styles.logActions}>
+                              {user?.role?.toLowerCase() === 'ppic' && (
+                                <TouchableOpacity
+                                  style={styles.editIconButton}
+                                  onPress={() => openEditLogWeight(log)}
+                                >
+                                  <Pencil color="#0ea5e9" size={18} />
+                                </TouchableOpacity>
+                              )}
                               {log.status === 'pending' && (
                                 <TouchableOpacity 
-                                  style={styles.printIconBtn}
+                                  style={styles.printIconButton}
                                   onPress={() => {
                                     setSelectedLogForPrint(log);
                                     setShowListPrintPreview(true);
@@ -1611,7 +2285,7 @@ const DashboardScreen = ({ navigation }: any) => {
                               const washingLine = selectedSubLine || undefined;
                               const response = await productionApi.updateLogStatus(selectedInputBag.output_bag_qr, 'Completed', washingLine);
                               if (response.data.success) {
-                          Alert.alert('Success', 'Material processing started');
+                          Alert.alert(t('common.success'), t('messages.materialProcessingStarted'));
                                 setSelectedInputBag(null);
                                 setBagSearchQuery('');
                                 setSuggestedBags([]);
@@ -1620,12 +2294,12 @@ const DashboardScreen = ({ navigation }: any) => {
                                 setSelectedSubLine(null);
                                 setSelectedSection(null);
                               } else {
-                                Alert.alert('Error', 'Failed to update batch status');
+                                Alert.alert(t('common.error'), t('messages.failedToUpdateBatchStatus'));
                               }
                             } else {
                               // For other stations (NOT washing), create a new processing log entry
                               if (!backendShiftId) {
-                                Alert.alert('Error', 'No active shift');
+                                Alert.alert(t('common.error'), t('messages.noActiveShift'));
                                 return;
                               }
                               const logData = {
@@ -1637,7 +2311,7 @@ const DashboardScreen = ({ navigation }: any) => {
                               };
                               const response = await productionApi.logProduction(logData);
                               if (response.data.success) {
-                                Alert.alert('Success', 'Material processing started');
+                                Alert.alert(t('common.success'), t('messages.materialProcessingStarted'));
                                 setSelectedInputBag(null);
                                 setBagSearchQuery('');
                                 setSuggestedBags([]);
@@ -1649,7 +2323,7 @@ const DashboardScreen = ({ navigation }: any) => {
                             }
                           } catch (error) {
                             console.error('Save input error:', error);
-                            Alert.alert('Error', 'Failed to start processing');
+                            Alert.alert(t('common.error'), t('messages.failedToStartProcessing'));
                           } finally {
                             setIsLoading(false);
                           }
@@ -1697,6 +2371,29 @@ const DashboardScreen = ({ navigation }: any) => {
                         <CameraIcon size={20} color="#475569" />
                         <Text style={styles.secondaryButtonText}>Take Photo</Text>
                       </TouchableOpacity>
+
+                      {capturedImages.length > 0 && (
+                        <ScrollView 
+                          horizontal 
+                          showsHorizontalScrollIndicator={false}
+                          style={styles.photosPreviewContainer}
+                          contentContainerStyle={styles.photosPreviewContent}
+                        >
+                          {capturedImages.map((imageUri, index) => (
+                            <View key={index} style={styles.photoPreviewItem}>
+                              <Image source={{ uri: imageUri }} style={styles.photoPreviewThumbnail} />
+                              <TouchableOpacity 
+                                style={styles.removePhotoButton} 
+                                onPress={() => {
+                                  setCapturedImages(prev => prev.filter((_, i) => i !== index));
+                                }}
+                              >
+                                <X size={16} color="#FFF" />
+                              </TouchableOpacity>
+                            </View>
+                          ))}
+                        </ScrollView>
+                      )}
 
                       <TouchableOpacity 
                         style={[styles.primaryButton, (!weightInput || isLoading) && { opacity: 0.5, backgroundColor: '#E2E8F0' }]}
@@ -1749,7 +2446,7 @@ const DashboardScreen = ({ navigation }: any) => {
                         <View style={[styles.selectionIconBox, { backgroundColor: '#f97316' }]}><Zap color="#FFF" size={28} /></View>
                         <View style={styles.selectionText}>
                           <Text style={styles.selectionCardTitle}>Extrusion 1</Text>
-                          <Text style={styles.selectionCardSub}>Primary Extrusion Line</Text>
+                          <Text style={styles.selectionCardSub}>{t('dashboard.primaryExtrusionLine')}</Text>
                         </View>
                         <ChevronRight color="#CCC" size={24} />
                       </TouchableOpacity>
@@ -1757,7 +2454,7 @@ const DashboardScreen = ({ navigation }: any) => {
                         <View style={[styles.selectionIconBox, { backgroundColor: '#ea580c' }]}><Zap color="#FFF" size={28} /></View>
                         <View style={styles.selectionText}>
                           <Text style={styles.selectionCardTitle}>Extrusion 2</Text>
-                          <Text style={styles.selectionCardSub}>Secondary Extrusion Line</Text>
+                          <Text style={styles.selectionCardSub}>{t('dashboard.secondaryExtrusionLine')}</Text>
                         </View>
                         <ChevronRight color="#CCC" size={24} />
                       </TouchableOpacity>
@@ -1765,7 +2462,15 @@ const DashboardScreen = ({ navigation }: any) => {
                         <View style={[styles.selectionIconBox, { backgroundColor: '#c2410c' }]}><Zap color="#FFF" size={28} /></View>
                         <View style={styles.selectionText}>
                           <Text style={styles.selectionCardTitle}>Extrusion 3</Text>
-                          <Text style={styles.selectionCardSub}>Tertiary Extrusion Line</Text>
+                          <Text style={styles.selectionCardSub}>{t('dashboard.tertiaryExtrusionLine')}</Text>
+                        </View>
+                        <ChevronRight color="#CCC" size={24} />
+                      </TouchableOpacity>
+                      <TouchableOpacity style={styles.selectionCard} onPress={() => { setPendingExtrusionLine('Mixture'); setShowExtrusionModal(true); }}>
+                        <View style={[styles.selectionIconBox, { backgroundColor: '#dc2626' }]}><Zap color="#FFF" size={28} /></View>
+                        <View style={styles.selectionText}>
+                          <Text style={styles.selectionCardTitle}>Mixture</Text>
+                          <Text style={styles.selectionCardSub}>{t('dashboard.mixtureLine')}</Text>
                         </View>
                         <ChevronRight color="#CCC" size={24} />
                       </TouchableOpacity>
@@ -1777,18 +2482,16 @@ const DashboardScreen = ({ navigation }: any) => {
                       <Text style={styles.logsTitle}>Recent Entries</Text>
                     </View>
 
-                    {/* Inline Date Picker */}
+                    {/* Date Picker */}
                     <View style={styles.datePickerContainer}>
                       <Text style={styles.datePickerLabel}>Select Date:</Text>
-                      <InlineDatePicker
-                        value={extrusionDatePickerDate}
+                      <StationDatePicker
+                        value={parseDateLocal(extrusionSelectedDate)}
                         onChange={(date) => {
-                          const dateStr = date.toISOString().split('T')[0];
-                          setExtrusionDatePickerDate(date);
-                          setExtrusionSelectedDate(dateStr);
+                          setExtrusionSelectedDate(formatDateLocal(date));
                           setExtrusionCurrentPage(1);
                         }}
-                        maximumDate={new Date()}
+                        maximumDate={maxDate}
                       />
                     </View>
                     
@@ -1846,6 +2549,12 @@ const DashboardScreen = ({ navigation }: any) => {
                           >
                             <Text style={[styles.filterButtonText, extrusionSelectedLineFilter === 'Extrusion 3' && styles.filterButtonTextActive]}>E3</Text>
                           </TouchableOpacity>
+                          <TouchableOpacity
+                            style={[styles.filterButton, extrusionSelectedLineFilter === 'Mixture' && styles.filterButtonActive]}
+                            onPress={() => { setExtrusionSelectedLineFilter('Mixture'); setExtrusionCurrentPage(1); }}
+                          >
+                            <Text style={[styles.filterButtonText, extrusionSelectedLineFilter === 'Mixture' && styles.filterButtonTextActive]}>MIX</Text>
+                          </TouchableOpacity>
                         </View>
                       </View>
 
@@ -1899,9 +2608,17 @@ const DashboardScreen = ({ navigation }: any) => {
                               </View>
                             </View>
                             <View style={styles.logActions}>
+                              {user?.role?.toLowerCase() === 'ppic' && (
+                                <TouchableOpacity
+                                  style={styles.editIconButton}
+                                  onPress={() => openEditLogWeight(log)}
+                                >
+                                  <Pencil color="#0ea5e9" size={18} />
+                                </TouchableOpacity>
+                              )}
                               {log.status === 'pending' && (
                                 <TouchableOpacity 
-                                  style={styles.printIconBtn}
+                                  style={styles.printIconButton}
                                   onPress={() => {
                                     setSelectedLogForPrint(log);
                                     setShowListPrintPreview(true);
@@ -1914,7 +2631,8 @@ const DashboardScreen = ({ navigation }: any) => {
                                 styles.logBadge,
                                 log.sub_line === 'Extrusion 1' && { backgroundColor: '#f97316' },
                                 log.sub_line === 'Extrusion 2' && { backgroundColor: '#ea580c' },
-                                log.sub_line === 'Extrusion 3' && { backgroundColor: '#c2410c' }
+                                log.sub_line === 'Extrusion 3' && { backgroundColor: '#c2410c' },
+                                log.sub_line === 'Mixture' && { backgroundColor: '#dc2626' }
                               ]}>
                                 <Text style={styles.logBadgeText}>{log.sub_line}</Text>
                               </View>
@@ -2028,7 +2746,7 @@ const DashboardScreen = ({ navigation }: any) => {
                             if (isExtrusionStation && selectedInputBag.output_bag_qr) {
                               // Ensure we have an extrusion line selected
                               if (!selectedSubLine) {
-                                Alert.alert('Error', 'Please select an extrusion line first');
+                                Alert.alert(t('common.error'), t('messages.pleaseSelectExtrusionLine'));
                                 setIsLoading(false);
                                 return;
                               }
@@ -2037,7 +2755,7 @@ const DashboardScreen = ({ navigation }: any) => {
                               const extrusionLine = selectedSubLine;
                               const response = await productionApi.updateLogStatus(selectedInputBag.output_bag_qr, 'Completed', undefined, extrusionLine);
                               if (response.data.success) {
-                                Alert.alert('Success', 'Material processing started');
+                                Alert.alert(t('common.success'), t('messages.materialProcessingStarted'));
                                 setSelectedInputBag(null);
                                 setBagSearchQuery('');
                                 setSuggestedBags([]);
@@ -2046,12 +2764,12 @@ const DashboardScreen = ({ navigation }: any) => {
                                 setSelectedSubLine(null);
                                 setSelectedSection(null);
                               } else {
-                                Alert.alert('Error', 'Failed to update batch status');
+                                Alert.alert(t('common.error'), t('messages.failedToUpdateBatchStatus'));
                               }
                             } else {
                               // For other stations (NOT extrusion), create a new processing log entry
                               if (!backendShiftId) {
-                                Alert.alert('Error', 'No active shift');
+                                Alert.alert(t('common.error'), t('messages.noActiveShift'));
                                 return;
                               }
                               const logData = {
@@ -2063,7 +2781,7 @@ const DashboardScreen = ({ navigation }: any) => {
                               };
                               const response = await productionApi.logProduction(logData);
                               if (response.data.success) {
-                                Alert.alert('Success', 'Material processing started');
+                                Alert.alert(t('common.success'), t('messages.materialProcessingStarted'));
                                 setSelectedInputBag(null);
                                 setBagSearchQuery('');
                                 setSuggestedBags([]);
@@ -2075,7 +2793,7 @@ const DashboardScreen = ({ navigation }: any) => {
                             }
                           } catch (error) {
                             console.error('Save input error:', error);
-                            Alert.alert('Error', 'Failed to start processing');
+                            Alert.alert(t('common.error'), t('messages.failedToStartProcessing'));
                           } finally {
                             setIsLoading(false);
                           }
@@ -2124,6 +2842,29 @@ const DashboardScreen = ({ navigation }: any) => {
                         <Text style={styles.secondaryButtonText}>Take Photo</Text>
                       </TouchableOpacity>
 
+                      {capturedImages.length > 0 && (
+                        <ScrollView 
+                          horizontal 
+                          showsHorizontalScrollIndicator={false}
+                          style={styles.photosPreviewContainer}
+                          contentContainerStyle={styles.photosPreviewContent}
+                        >
+                          {capturedImages.map((imageUri, index) => (
+                            <View key={index} style={styles.photoPreviewItem}>
+                              <Image source={{ uri: imageUri }} style={styles.photoPreviewThumbnail} />
+                              <TouchableOpacity 
+                                style={styles.removePhotoButton} 
+                                onPress={() => {
+                                  setCapturedImages(prev => prev.filter((_, i) => i !== index));
+                                }}
+                              >
+                                <X size={16} color="#FFF" />
+                              </TouchableOpacity>
+                            </View>
+                          ))}
+                        </ScrollView>
+                      )}
+
                       <TouchableOpacity 
                         style={[styles.primaryButton, (!weightInput || isLoading) && { opacity: 0.5, backgroundColor: '#E2E8F0' }]}
                         onPress={handleLogProduction}
@@ -2138,7 +2879,7 @@ const DashboardScreen = ({ navigation }: any) => {
                       </TouchableOpacity>
                 </View>
 
-                    {/* Shift Progress Section */}
+                {/* Shift Progress Section */}
                     <View style={styles.progressCardRedesign}>
                       <Text style={styles.progressTitleRedesign}>Shift Progress ({selectedSubLine})</Text>
                       <View style={styles.progressDataRow}>
@@ -2188,14 +2929,14 @@ const DashboardScreen = ({ navigation }: any) => {
                               const washingLine = selectedSubLine || undefined;
                               const response = await productionApi.updateLogStatus(selectedInputBag.output_bag_qr, 'Completed', washingLine);
                               if (response.data.success) {
-                                Alert.alert('Success', 'Material processing started');
+                                Alert.alert(t('common.success'), t('messages.materialProcessingStarted'));
                                 setSelectedInputBag(null);
                                 setBagSearchQuery('');
                                 setSuggestedBags([]);
                                 setShowSuggestions(false);
                                 setSelectedStation(null);
                               } else {
-                                Alert.alert('Error', 'Failed to update batch status');
+                                Alert.alert(t('common.error'), t('messages.failedToUpdateBatchStatus'));
                               }
                             } else if (isFinalPackaging && selectedInputBag.output_bag_qr) {
                               // Final Packaging: ONLY update the existing extrusion batch (NO new entry)
@@ -2203,7 +2944,7 @@ const DashboardScreen = ({ navigation }: any) => {
                               const finalPackagingLine = selectedSubLine || selectedStation.name || undefined;
                               const response = await productionApi.updateLogStatus(selectedInputBag.output_bag_qr, 'Completed', undefined, undefined, finalPackagingLine);
                               if (response.data.success) {
-                                Alert.alert('Success', 'Material processing started');
+                                Alert.alert(t('common.success'), t('messages.materialProcessingStarted'));
                                 setSelectedInputBag(null);
                                 setBagSearchQuery('');
                                 setSuggestedBags([]);
@@ -2212,12 +2953,12 @@ const DashboardScreen = ({ navigation }: any) => {
                                 setSelectedSubLine(null);
                                 setSelectedSection(null);
                               } else {
-                                Alert.alert('Error', 'Failed to update batch status');
+                                Alert.alert(t('common.error'), t('messages.failedToUpdateBatchStatus'));
                               }
                             } else {
                               // For other stations (NOT washing, NOT Final Packaging), create a new processing log entry
                               if (!backendShiftId) {
-                                Alert.alert('Error', 'No active shift');
+                                Alert.alert(t('common.error'), t('messages.noActiveShift'));
                                 return;
                               }
                               const logData = {
@@ -2229,7 +2970,7 @@ const DashboardScreen = ({ navigation }: any) => {
                               };
                               const response = await productionApi.logProduction(logData);
                               if (response.data.success) {
-                                Alert.alert('Success', 'Material processing started');
+                                Alert.alert(t('common.success'), t('messages.materialProcessingStarted'));
                                 setSelectedInputBag(null);
                                 setBagSearchQuery('');
                                 setSuggestedBags([]);
@@ -2239,7 +2980,7 @@ const DashboardScreen = ({ navigation }: any) => {
                             }
                           } catch (error) {
                             console.error('Save input error:', error);
-                            Alert.alert('Error', 'Failed to start processing');
+                            Alert.alert(t('common.error'), t('messages.failedToStartProcessing'));
                           } finally {
                             setIsLoading(false);
                           }
@@ -2249,7 +2990,7 @@ const DashboardScreen = ({ navigation }: any) => {
             </TouchableOpacity>
           </View>
                   ) : (
-                    <View><Text style={styles.formTitle}>Output Recording</Text><View style={styles.inputGroup}><Text style={styles.label}>Weight (kg)</Text><TextInput style={styles.input} keyboardType="numeric" placeholder="0.00" value={weightInput} onChangeText={setWeightInput} /></View><TouchableOpacity style={styles.primaryButton} disabled={!weightInput || isLoading} onPress={handleLogProduction}><PrinterIcon color="#FFF" size={20} /><Text style={styles.primaryButtonText}>Generate QR & Print</Text></TouchableOpacity></View>
+                    <View><Text style={styles.formTitle}>{t('dashboard.outputRecording')}</Text><View style={styles.inputGroup}><Text style={styles.label}>{t('dashboard.weightKg')}</Text><TextInput style={styles.input} keyboardType="numeric" placeholder="0.00" value={weightInput} onChangeText={setWeightInput} /></View><TouchableOpacity style={styles.primaryButton} disabled={!weightInput || isLoading} onPress={handleLogProduction}><PrinterIcon color="#FFF" size={20} /><Text style={styles.primaryButtonText}>{t('dashboard.generateQRPrint')}</Text></TouchableOpacity></View>
                   )}
         </View>
               </>
@@ -2258,12 +2999,76 @@ const DashboardScreen = ({ navigation }: any) => {
         )}
       </ScrollView>
 
-      <Modal visible={showScanner} animationType="fade"><View style={styles.scannerContainer}><CameraView onBarcodeScanned={scanned ? undefined : handleBarCodeScanned} barcodeScannerSettings={{ barcodeTypes: ['qr'] }} style={StyleSheet.absoluteFillObject} /><View style={styles.scannerOverlay}><Text style={styles.scannerText}>Scan Bag QR Code</Text><TouchableOpacity style={styles.closeScanner} onPress={() => setShowScanner(false)}><X color="#FFF" size={32} /></TouchableOpacity></View></View></Modal>
+      <Modal visible={showScanner} animationType="fade"><View style={styles.scannerContainer}><CameraView onBarcodeScanned={scanned ? undefined : handleBarCodeScanned} barcodeScannerSettings={{ barcodeTypes: ['qr'] }} style={StyleSheet.absoluteFillObject} /><View style={styles.scannerOverlay}><Text style={styles.scannerText}>{t('dashboard.scanBagQR')}</Text><TouchableOpacity style={styles.closeScanner} onPress={() => setShowScanner(false)}><X color="#FFF" size={32} /></TouchableOpacity></View></View></Modal>
+      
+      {/* Camera Preview Modal */}
+      <Modal visible={showCameraPreview} animationType="fade">
+        <View style={styles.cameraContainer}>
+          {hasPermission && (
+            <CameraView
+              ref={cameraRef}
+              style={StyleSheet.absoluteFillObject}
+              facing="back"
+            />
+          )}
+          <View style={styles.cameraOverlay}>
+            <View style={styles.cameraHeader}>
+              <TouchableOpacity style={styles.cameraCloseButton} onPress={handleCancelPhoto}>
+                <X color="#FFF" size={32} />
+              </TouchableOpacity>
+            </View>
+            <View style={styles.cameraControls}>
+              <TouchableOpacity 
+                style={styles.captureButton} 
+                onPress={handleCapturePhoto}
+                disabled={!hasPermission}
+              >
+                <View style={styles.captureButtonInner} />
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Photo Preview Modal */}
+      <Modal visible={showPhotoPreview} transparent animationType="fade">
+        <View style={styles.photoPreviewOverlay}>
+          <View style={styles.photoPreviewContent}>
+            <View style={styles.photoPreviewHeader}>
+              <Text style={styles.photoPreviewTitle}>{t('dashboard.photoPreview')}</Text>
+              <TouchableOpacity onPress={handleCancelPhoto}>
+                <X color="#333" size={24} />
+              </TouchableOpacity>
+            </View>
+            {tempCapturedImage && (
+              <Image 
+                source={{ uri: tempCapturedImage }} 
+                style={styles.photoPreviewImage}
+                resizeMode="contain"
+              />
+            )}
+            <View style={styles.photoPreviewActions}>
+              <TouchableOpacity 
+                style={[styles.photoPreviewButton, styles.retakeButton]} 
+                onPress={handleRetakePhoto}
+              >
+                <Text style={styles.retakeButtonText}>{t('dashboard.retake')}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity 
+                style={[styles.photoPreviewButton, styles.acceptButton]} 
+                onPress={handleAcceptPhoto}
+              >
+                <Text style={styles.acceptButtonText}>{t('dashboard.usePhoto')}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
       <Modal visible={showPrintPreview} transparent animationType="fade">
         <View style={styles.previewOverlay}>
           <View style={styles.previewContent}>
             <View style={styles.previewHeader}>
-              <Text style={styles.previewTitle}>Label Preview</Text>
+              <Text style={styles.previewTitle}>{t('dashboard.labelPreview')}</Text>
               <TouchableOpacity onPress={handleClosePreview} disabled={isPrinting || isLoading}>
                 <X color="#333" size={24} />
               </TouchableOpacity>
@@ -2298,6 +3103,47 @@ const DashboardScreen = ({ navigation }: any) => {
                   <Text style={styles.previewValue}>{previewData?.date}</Text>
                 </View>
               </View>
+
+              {/* Jumbo bag type: Pending (temporary) or Completed (final) */}
+              {!isCurrentLogSaved && (
+                <View style={[styles.inputGroup, { marginTop: 12, width: '100%' }]}>
+                  <Text style={styles.label}>{t('dashboard.jumboBagType')}</Text>
+                  <View style={styles.filterButtons}>
+                    <TouchableOpacity
+                      style={[styles.filterButton, previewBagStatus === 'pending' && styles.filterButtonActive]}
+                      onPress={() => setPreviewBagStatus('pending')}
+                    >
+                      <Text style={[styles.filterButtonText, previewBagStatus === 'pending' && styles.filterButtonTextActive]}>
+                        {t('dashboard.temporaryJumboBag')}
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.filterButton, previewBagStatus === 'Completed' && styles.filterButtonActive]}
+                      onPress={() => setPreviewBagStatus('Completed')}
+                    >
+                      <Text style={[styles.filterButtonText, previewBagStatus === 'Completed' && styles.filterButtonTextActive]}>
+                        {t('dashboard.finalJumboBag')}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )}
+
+              {/* Remark (final stage for worker – optional before save) */}
+              {!isCurrentLogSaved && (
+                <View style={[styles.inputGroup, { marginTop: 12, width: '100%' }]}>
+                  <Text style={styles.label}>{t('dashboard.remark')}</Text>
+                  <TextInput
+                    style={[styles.input, { minHeight: 44 }]}
+                    placeholder={t('dashboard.remarkPlaceholder')}
+                    placeholderTextColor="#94a3b8"
+                    value={remarkInput}
+                    onChangeText={setRemarkInput}
+                    multiline
+                    numberOfLines={2}
+                  />
+                </View>
+              )}
             </View>
 
             {/* STEP 1: SAVE Button (Initially visible) */}
@@ -2344,7 +3190,7 @@ const DashboardScreen = ({ navigation }: any) => {
         <View style={styles.previewOverlay}>
           <View style={styles.previewContent}>
             <View style={styles.previewHeader}>
-              <Text style={styles.previewTitle}>Label Preview</Text>
+              <Text style={styles.previewTitle}>{t('dashboard.labelPreview')}</Text>
               <TouchableOpacity onPress={() => { setShowListPrintPreview(false); setSelectedLogForPrint(null); }} disabled={isPrinting}>
                 <X color="#333" size={24} />
               </TouchableOpacity>
@@ -2506,6 +3352,121 @@ const DashboardScreen = ({ navigation }: any) => {
               </View>
             </TouchableOpacity>
             </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={editingLogWeight != null} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>{t('dashboard.editWeight')}</Text>
+              <TouchableOpacity onPress={() => { setEditingLogWeight(null); setEditWeightValue(''); }}>
+                <X color="#333" size={24} />
+              </TouchableOpacity>
+            </View>
+            <View style={styles.inputGroup}>
+              <Text style={styles.label}>{t('dashboard.weightKg')}</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="decimal-pad"
+                placeholder="0.00"
+                value={editWeightValue}
+                onChangeText={setEditWeightValue}
+              />
+            </View>
+            <View style={{ flexDirection: 'row', gap: 12, marginTop: 20 }}>
+              <TouchableOpacity
+                style={[styles.primaryButton, { flex: 1, backgroundColor: '#64748b' }]}
+                onPress={() => { setEditingLogWeight(null); setEditWeightValue(''); }}
+              >
+                <Text style={styles.primaryButtonText}>{t('common.cancel')}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.primaryButton, { flex: 1 }]}
+                onPress={saveEditedLogWeight}
+                disabled={isLoading || !editWeightValue}
+              >
+                {isLoading ? (
+                  <ActivityIndicator color="#FFF" />
+                ) : (
+                  <Text style={styles.primaryButtonText}>{t('common.save')}</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={showClosedReportsModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>{t('dashboard.closedReports')}</Text>
+              <TouchableOpacity onPress={() => setShowClosedReportsModal(false)}>
+                <X color="#333" size={24} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.modalSubtitle}>{t('dashboard.selectShiftToEditPrint')}</Text>
+            {closedShiftsLoading ? (
+              <View style={{ padding: 24, alignItems: 'center' }}><ActivityIndicator color="#333" /></View>
+            ) : closedShiftsList.length === 0 ? (
+              <Text style={{ padding: 16, color: '#666' }}>{t('dashboard.noClosedShifts')}</Text>
+            ) : (
+              <ScrollView style={{ maxHeight: 400 }} contentContainerStyle={{ paddingBottom: 16 }}>
+                {closedShiftsList.map((item: any) => (
+                  <TouchableOpacity
+                    key={item.shiftId}
+                    style={[styles.selectionCard, { marginBottom: 8 }]}
+                    onPress={() => handleSelectClosedShift(item.shiftId)}
+                  >
+                    <Text style={styles.cardTitle}>{item.shiftName} — {item.date}</Text>
+                    <Text style={{ fontSize: 13, color: '#666', marginTop: 4 }}>{item.operatorName}</Text>
+                    <Text style={{ fontSize: 12, color: '#17a34a', marginTop: 4 }}>{item.totalOutputs} outputs · {item.totalWeight} kg</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={editingByProductIndex != null} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Edit weight</Text>
+              <TouchableOpacity onPress={() => { setEditingByProductIndex(null); setEditByProductWeight(''); }}>
+                <X color="#333" size={24} />
+              </TouchableOpacity>
+            </View>
+            {editingByProductIndex != null && (() => {
+              const byProductsList = showShiftClosedView ? closedShiftByProducts : savedByProductsOnStartPage;
+              const product = byProductsList[editingByProductIndex];
+              return product ? (
+                <>
+                  <Text style={styles.modalSubtitle}>{product.name} — {product.stationName}</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 12, marginBottom: 20 }}>
+                    <TextInput
+                      style={[styles.byProductInput, { flex: 1, marginRight: 8 }]}
+                      keyboardType="decimal-pad"
+                      value={editByProductWeight}
+                      onChangeText={setEditByProductWeight}
+                      placeholder="Weight (kg)"
+                    />
+                    <Text style={{ fontSize: 16 }}>kg</Text>
+                  </View>
+                  <View style={{ flexDirection: 'row' }}>
+                    <TouchableOpacity style={[styles.closeShiftBtn, { flex: 1, backgroundColor: '#6b7280', marginRight: 6 }]} onPress={() => { setEditingByProductIndex(null); setEditByProductWeight(''); }}>
+                      <Text style={styles.closeShiftText}>Cancel</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={[styles.closeShiftBtn, { flex: 1, marginLeft: 6 }]} onPress={saveEditedByProduct}>
+                      <Text style={styles.closeShiftText}>Save</Text>
+                    </TouchableOpacity>
+                  </View>
+                </>
+              ) : null;
+            })()}
           </View>
         </View>
       </Modal>
@@ -2773,22 +3734,25 @@ const styles = StyleSheet.create({
     fontFamily 
   },
   logActions: { 
-    flexDirection: 'column', 
-    alignItems: 'flex-end', 
+    flexDirection: 'row', 
+    alignItems: 'center', 
     gap: 6,
-    justifyContent: 'flex-start'
+    justifyContent: 'flex-end'
+  },
+  editIconButton: {
+    padding: 8,
+    borderRadius: 8,
+    backgroundColor: '#E0F2FE',
   },
   printIconButton: { 
     padding: 8, 
     borderRadius: 8, 
     backgroundColor: '#F0FDF4',
-    alignSelf: 'flex-end'
   },
   logBadge: { 
     paddingHorizontal: 10, 
     paddingVertical: 4, 
     borderRadius: 12,
-    alignSelf: 'flex-end'
   },
   logBadgeText: { 
     fontSize: 11, 
@@ -2877,6 +3841,29 @@ const styles = StyleSheet.create({
   scannerOverlay: { position: 'absolute', top: 50, left: 0, right: 0, alignItems: 'center' },
   scannerText: { color: '#FFF', fontSize: 18, fontWeight: '700', backgroundColor: 'rgba(0,0,0,0.5)', paddingHorizontal: 20, paddingVertical: 10, borderRadius: 20 },
   closeScanner: { marginTop: 20 },
+  cameraContainer: { flex: 1, backgroundColor: '#000' },
+  cameraOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, justifyContent: 'space-between' },
+  cameraHeader: { paddingTop: 50, paddingHorizontal: 20, alignItems: 'flex-start' },
+  cameraCloseButton: { padding: 8, backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 20 },
+  cameraControls: { paddingBottom: 50, alignItems: 'center' },
+  captureButton: { width: 80, height: 80, borderRadius: 40, backgroundColor: '#FFF', justifyContent: 'center', alignItems: 'center', borderWidth: 4, borderColor: '#17a34a' },
+  captureButtonInner: { width: 64, height: 64, borderRadius: 32, backgroundColor: '#17a34a' },
+  photoPreviewOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'center', alignItems: 'center', padding: 20 },
+  photoPreviewContent: { backgroundColor: '#FFF', borderRadius: 24, padding: 24, width: '100%', maxWidth: 500 },
+  photoPreviewHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
+  photoPreviewTitle: { fontSize: 20, fontWeight: '700', color: '#333' },
+  photoPreviewImage: { width: '100%', height: 400, borderRadius: 16, marginBottom: 20, backgroundColor: '#F9FAFB' },
+  photoPreviewActions: { flexDirection: 'row', gap: 12 },
+  photoPreviewButton: { flex: 1, padding: 16, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  retakeButton: { backgroundColor: '#F1F5F9', borderWidth: 1, borderColor: '#E2E8F0' },
+  retakeButtonText: { color: '#64748B', fontSize: 16, fontWeight: '700' },
+  acceptButton: { backgroundColor: '#17a34a' },
+  acceptButtonText: { color: '#FFF', fontSize: 16, fontWeight: '700' },
+  photosPreviewContainer: { marginTop: 12, marginBottom: 12, maxHeight: 140 },
+  photosPreviewContent: { paddingRight: 12, gap: 12 },
+  photoPreviewItem: { position: 'relative', marginRight: 12 },
+  photoPreviewThumbnail: { width: 120, height: 120, borderRadius: 12, backgroundColor: '#F9FAFB' },
+  removePhotoButton: { position: 'absolute', top: -8, right: -8, width: 28, height: 28, borderRadius: 14, backgroundColor: '#EF4444', justifyContent: 'center', alignItems: 'center', borderWidth: 2, borderColor: '#FFF' },
   summaryContainer: { padding: 16 },
   summaryStatsCard: { backgroundColor: '#FFF', borderRadius: 16, padding: 20, marginBottom: 24, elevation: 3 },
   cardTitle: { fontSize: 18, fontWeight: '700', color: '#333', marginBottom: 16 },
@@ -2885,6 +3872,7 @@ const styles = StyleSheet.create({
   summaryValue: { fontSize: 20, fontWeight: '700', color: '#17a34a' },
   summaryLabel: { fontSize: 12, color: '#666', marginTop: 4 },
   byProductRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFF', padding: 16, borderRadius: 12, marginBottom: 12, borderWidth: 1, borderColor: '#EEE' },
+  editByProductBtn: { padding: 8 },
   byProductName: { fontSize: 16, fontWeight: '700', color: '#333' },
   byProductStation: { fontSize: 12, color: '#666' },
   byProductInputWrapper: { flexDirection: 'row', alignItems: 'center' },
@@ -2903,6 +3891,7 @@ const styles = StyleSheet.create({
   grayEmptyText: { color: '#999', fontSize: 14 },
   inputWithIcon: { flexDirection: 'row', alignItems: 'center' },
   iconInsideInput: { position: 'absolute', right: 12 },
+  afterCloseHint: { fontSize: 13, color: '#666', marginTop: 12, marginBottom: 4, lineHeight: 18 },
   closeShiftBtn: { backgroundColor: '#232938', padding: 18, borderRadius: 12, alignItems: 'center', marginTop: 20, marginBottom: 40 },
   closeShiftText: { color: '#FFF', fontSize: 18, fontWeight: '700' },
   previewOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center', padding: 20 },

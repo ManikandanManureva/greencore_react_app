@@ -13,6 +13,7 @@ import { Check, Clock } from 'lucide-react-native';
 import { useAuth } from '../navigation/AuthContext';
 import { masterDataApi, productionApi } from '../api/production';
 import { Shift } from '../types';
+import { t } from '../utils/i18n';
 
 const ShiftSelectionScreen = ({ navigation }: any) => {
   const { user, selectedShift, setSelectedShift } = useAuth();
@@ -68,15 +69,15 @@ const ShiftSelectionScreen = ({ navigation }: any) => {
           <View style={styles.headerIcon}>
             <Clock color="#FFF" size={36} />
           </View>
-          <Text style={styles.title}>Select Your Shift</Text>
-          <Text style={styles.subtitle}>Welcome, {user?.name}</Text>
-          <Text style={styles.dateText}>{new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</Text>
+          <Text style={styles.title}>{t('shift.selectShift')}</Text>
+          <Text style={styles.subtitle}>{t('shift.welcome')}, {user?.name}</Text>
+          <Text style={styles.dateText}>{new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</Text>
         </View>
 
         {isLoading ? (
           <View style={styles.loading}>
             <ActivityIndicator size="large" color="#17a34a" />
-            <Text style={styles.loadingText}>Loading shifts...</Text>
+            <Text style={styles.loadingText}>{t('shift.loadingShifts')}</Text>
           </View>
         ) : (
           <ScrollView style={styles.list}>
@@ -114,7 +115,7 @@ const ShiftSelectionScreen = ({ navigation }: any) => {
             disabled={!selectedShift || isLoading}
             onPress={handleContinue}
           >
-            <Text style={styles.continueText}>Continue</Text>
+            <Text style={styles.continueText}>{t('shift.continue')}</Text>
           </TouchableOpacity>
         </View>
       </View>

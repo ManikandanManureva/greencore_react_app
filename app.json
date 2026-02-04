@@ -14,7 +14,8 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.anonymous.greencore-app-react"
     },
     "android": {
       "adaptiveIcon": {
@@ -30,7 +31,8 @@
         "android.permission.BLUETOOTH_SCAN",
         "android.permission.BLUETOOTH_CONNECT",
         "android.permission.ACCESS_FINE_LOCATION",
-        "android.permission.INTERNET"
+        "android.permission.INTERNET",
+        "android.permission.RECORD_AUDIO"
       ],
       "package": "com.anonymous.greencore_app_react"
     },
@@ -39,8 +41,7 @@
       "bundler": "metro"
     },
     "plugins": [
-      "expo-camera",
-      "@react-native-community/datetimepicker"
+      "expo-camera"
     ]
   }
 }

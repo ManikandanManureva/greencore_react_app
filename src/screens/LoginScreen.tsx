@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   StyleSheet,
   View,
@@ -14,17 +14,28 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Eye, EyeOff } from 'lucide-react-native';
 import { useAuth } from '../navigation/AuthContext';
+import { t, i18n, Language } from '../utils/i18n';
+import LanguageSwitcher from '../components/LanguageSwitcher';
 
 const LoginScreen = () => {
   const [employeeId, setEmployeeId] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [currentLanguage, setCurrentLanguage] = useState<Language>(i18n.getLanguage());
   const { login } = useAuth();
+
+  // Subscribe to language changes to force re-render
+  useEffect(() => {
+    const unsubscribe = i18n.onLanguageChange((language) => {
+      setCurrentLanguage(language);
+    });
+    return unsubscribe;
+  }, []);
 
   const handleLogin = async () => {
     if (!employeeId || !password) {
-      Alert.alert('Error', 'Please enter both Employee ID and Password');
+      Alert.alert(t('common.error'), t('login.errorEmpty'));
       return;
     }
 
@@ -32,7 +43,7 @@ const LoginScreen = () => {
     try {
       await login(employeeId, password);
     } catch (error: any) {
-      Alert.alert('Login Failed', error.message || 'An error occurred during login');
+      Alert.alert(t('login.errorFailed'), error.message || t('login.errorMessage'));
     } finally {
       setLoading(false);
     }
@@ -45,6 +56,12 @@ const LoginScreen = () => {
         style={styles.keyboardView}
       >
         <View style={styles.loginCard}>
+          {/* Language Switcher */}
+          <View style={styles.languageSwitcher}>
+            <Text style={styles.languageLabel}>{t('login.selectLanguage')}</Text>
+            <LanguageSwitcher />
+          </View>
+
           <View style={styles.logoContainer}>
             <View style={styles.logoIcon}>
               <Image
@@ -55,15 +72,15 @@ const LoginScreen = () => {
             </View>
           </View>
 
-          <Text style={styles.appTitle}>PC Production</Text>
-          <Text style={styles.appSubtitle}>GREENCORE Resources Indonesia</Text>
+          <Text style={styles.appTitle}>{t('login.title')}</Text>
+          <Text style={styles.appSubtitle}>{t('login.subtitle')}</Text>
 
           <View style={styles.form}>
             <View style={styles.inputGroup}>
-              <Text style={styles.label}>Employee ID</Text>
+              <Text style={styles.label}>{t('login.employeeId')}</Text>
               <TextInput
                 style={styles.input}
-                placeholder="OP001"
+                placeholder={t('login.employeeIdPlaceholder')}
                 value={employeeId}
                 onChangeText={setEmployeeId}
                 autoCapitalize="characters"
@@ -71,11 +88,11 @@ const LoginScreen = () => {
             </View>
 
             <View style={styles.inputGroup}>
-              <Text style={styles.label}>Password</Text>
+              <Text style={styles.label}>{t('login.password')}</Text>
               <View style={{ position: 'relative' }}>
                 <TextInput
                   style={[styles.input, { paddingRight: 45 }]}
-                  placeholder="Enter your password"
+                  placeholder={t('login.passwordPlaceholder')}
                   value={password}
                   onChangeText={setPassword}
                   secureTextEntry={!showPassword}
@@ -101,7 +118,7 @@ const LoginScreen = () => {
               {loading ? (
                 <ActivityIndicator color="#FFF" />
               ) : (
-                <Text style={styles.loginButtonText}>Login</Text>
+                <Text style={styles.loginButtonText}>{t('login.loginButton')}</Text>
               )}
             </TouchableOpacity>
           </View>
@@ -133,6 +150,19 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.2,
     shadowRadius: 20,
     elevation: 5,
+  },
+  languageSwitcher: {
+    marginBottom: 24,
+    paddingBottom: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#E5E7EB',
+    alignItems: 'center',
+  },
+  languageLabel: {
+    fontSize: 12,
+    color: '#666',
+    marginBottom: 8,
+    textAlign: 'center',
   },
   logoContainer: {
     alignItems: 'center',
