@@ -94,6 +94,8 @@
     "secondaryExtrusionLine": "Garis Extrusion Sekunder",
     "tertiaryExtrusionLine": "Garis Extrusion Tersier",
     "mixtureLine": "Garis Campuran",
+    "silo": "SILO",
+    "siloLine": "Garis SILO",
     "editWeight": "Edit Berat",
     "remark": "Keterangan",
     "remarkPlaceholder": "Catatan opsional (mis. batch, kualitas)",

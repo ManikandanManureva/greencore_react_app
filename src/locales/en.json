@@ -94,6 +94,8 @@
     "secondaryExtrusionLine": "Secondary Extrusion Line",
     "tertiaryExtrusionLine": "Tertiary Extrusion Line",
     "mixtureLine": "Mixture Line",
+    "silo": "SILO",
+    "siloLine": "SILO Line",
     "editWeight": "Edit Weight",
     "remark": "Remark",
     "remarkPlaceholder": "Optional note (e.g. batch, quality)",
