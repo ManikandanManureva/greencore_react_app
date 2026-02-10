@@ -3,20 +3,13 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 
-// Get the host machine IP dynamically for physical devices during development
-const getBaseUrl = () => {
-  // Production API server
-  const API_HOST = '13.214.29.7';
-  //const API_PORT = '5000';
+// Switch to '54.169.140.182:3000' for EC2 production API.
+const API_HOST = '54.169.140.182:3000';
+const API_URL = `http://${API_HOST}`;
+// Local server (this repo) uses /api/auth, /api/production; EC2 uses /auth, /production.
+const API_PREFIX = (API_HOST.startsWith('localhost') || API_HOST.startsWith('127.0.0.1')) ? '/api' : '';
 
-  // For all platforms, use the production API
-  // The server expects /api/api as the base path (e.g., /api/api/auth/login)
-  return `http://${API_HOST}/api/api`;
-};
-
-const API_URL = getBaseUrl();
-
-console.log('Connecting to API at:', API_URL);
+console.log('Connecting to API at:', API_URL, 'prefix:', API_PREFIX || '(none)');
 
 const client = axios.create({
   baseURL: API_URL,
@@ -26,6 +19,9 @@ const client = axios.create({
 });
 
 client.interceptors.request.use(async (config) => {
+  if (API_PREFIX && config.url?.startsWith('/')) {
+    config.url = API_PREFIX + config.url;
+  }
   const token = await AsyncStorage.getItem('auth_token');
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;

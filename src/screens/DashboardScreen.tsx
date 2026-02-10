@@ -63,17 +63,6 @@ function parseDateLocal(s: string): Date {
   return new Date(s + 'T12:00:00');
 }
 
-/** Waste from machines: per station, per section (sub-line), fixed waste types. */
-const WASTE_CONFIG: {
-  crusher: { subLines: string[]; wasteTypes: string[] };
-  washing: { subLines: string[]; wasteTypes: string[] };
-  extrusion: { subLines: string[]; wasteTypes: string[] };
-} = {
-  crusher: { subLines: ['3E', 'Rapid', 'Betty'], wasteTypes: ['Dust Remove Label', 'Sweep Floor'] },
-  washing: { subLines: ['Washing 1', 'Washing 2', 'Washing 3'], wasteTypes: ['Dust wet'] },
-  extrusion: { subLines: ['Extrusion 1', 'Extrusion 2', 'Extrusion 3', 'SILO'], wasteTypes: ['Lumps', 'Sweep Floor'] },
-};
-
 const DashboardScreen = ({ navigation }: any) => {
   const { user, logout, selectedShift } = useAuth();
   
@@ -95,7 +84,7 @@ const DashboardScreen = ({ navigation }: any) => {
   const [pendingStation, setPendingStation] = useState<Station | null>(null);
   const [pendingWashingLine, setPendingWashingLine] = useState<'Washing 1' | 'Washing 2' | 'Washing 3' | null>(null);
   const [showWashingModal, setShowWashingModal] = useState(false);
-  const [pendingExtrusionLine, setPendingExtrusionLine] = useState<'Extrusion 1' | 'Extrusion 2' | 'Extrusion 3' | 'SILO' | null>(null);
+  const [pendingExtrusionLine, setPendingExtrusionLine] = useState<'Extrusion 1' | 'Extrusion 2' | 'Extrusion 3' | 'Mixture' | null>(null);
   const [showExtrusionModal, setShowExtrusionModal] = useState(false);
   
   // Input/Output State
@@ -105,7 +94,7 @@ const DashboardScreen = ({ navigation }: any) => {
   const [selectedInputBag, setSelectedInputBag] = useState<any>(null);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [isCurrentLogSaved, setIsCurrentLogSaved] = useState(false);
-  const [selectedSubLine, setSelectedSubLine] = useState<'3E' | 'Rapid' | 'Betty' | 'Washing 1' | 'Washing 2' | 'Washing 3' | 'Extrusion 1' | 'Extrusion 2' | 'Extrusion 3' | 'SILO' | null>(null);
+  const [selectedSubLine, setSelectedSubLine] = useState<'3E' | 'Rapid' | 'Betty' | 'Washing 1' | 'Washing 2' | 'Washing 3' | 'Extrusion 1' | 'Extrusion 2' | 'Extrusion 3' | 'Mixture' | null>(null);
   const [currentViewBags, setCurrentViewBags] = useState(0);
   const [currentViewWeight, setCurrentViewWeight] = useState(0);
   
@@ -143,7 +132,7 @@ const DashboardScreen = ({ navigation }: any) => {
   const [extrusionCurrentPage, setExtrusionCurrentPage] = useState(1);
   const [extrusionTotalPages, setExtrusionTotalPages] = useState(1);
   const [extrusionTotalLogs, setExtrusionTotalLogs] = useState(0);
-  const [extrusionSelectedLineFilter, setExtrusionSelectedLineFilter] = useState<string>('all'); // 'all', 'Extrusion 1', 'Extrusion 2', 'Extrusion 3', 'SILO'
+  const [extrusionSelectedLineFilter, setExtrusionSelectedLineFilter] = useState<string>('all'); // 'all', 'Extrusion 1', 'Extrusion 2', 'Extrusion 3', 'Mixture'
   const [extrusionSelectedStatusFilter, setExtrusionSelectedStatusFilter] = useState<string>('all'); // 'all', 'pending', 'Completed'
   
   // Scanner State
@@ -166,7 +155,7 @@ const DashboardScreen = ({ navigation }: any) => {
   const [showShiftClosedView, setShowShiftClosedView] = useState(false);
   const [closedShiftId, setClosedShiftId] = useState<number | null>(null);
   const [closedShiftByProducts, setClosedShiftByProducts] = useState<any[]>([]);
-  const [closedShiftMeta, setClosedShiftMeta] = useState<{ shift: string; operator: string; date: string; totalOutputs: number; totalWeight: string; remark?: string; byStation?: { crusher: { outputs: number; weight: string }; washing: { outputs: number; weight: string }; extrusion: { outputs: number; weight: string } }; waste?: { stationName: string; subLine: string; wasteType: string; weight: number }[] } | null>(null);
+  const [closedShiftMeta, setClosedShiftMeta] = useState<{ shift: string; operator: string; date: string; totalOutputs: number; totalWeight: string; remark?: string; byStation?: { crusher: { outputs: number; weight: string }; washing: { outputs: number; weight: string }; extrusion: { outputs: number; weight: string } } } | null>(null);
   const [closedByProductsLoading, setClosedByProductsLoading] = useState(false);
   const [editingByProductIndex, setEditingByProductIndex] = useState<number | null>(null);
   const [editByProductWeight, setEditByProductWeight] = useState('');
@@ -178,9 +167,8 @@ const DashboardScreen = ({ navigation }: any) => {
 
   // Saved by-products on start shift page (editable after save)
   const [savedByProductsOnStartPage, setSavedByProductsOnStartPage] = useState<any[]>([]);
-  const [savedByProductsMeta, setSavedByProductsMeta] = useState<{ shift: string; operator: string; date: string; totalOutputs: number; totalWeight: string; remark?: string; byStation?: { crusher: { outputs: number; weight: string }; washing: { outputs: number; weight: string }; extrusion: { outputs: number; weight: string } }; waste?: { stationName: string; subLine: string; wasteType: string; weight: number }[] } | null>(null);
+  const [savedByProductsMeta, setSavedByProductsMeta] = useState<{ shift: string; operator: string; date: string; totalOutputs: number; totalWeight: string; remark?: string; byStation?: { crusher: { outputs: number; weight: string }; washing: { outputs: number; weight: string }; extrusion: { outputs: number; weight: string } } } | null>(null);
   const [endShiftRemark, setEndShiftRemark] = useState('');
-  const [wasteInputs, setWasteInputs] = useState<{ stationId: number; stationKey: string; subLine: string; wasteType: string; weight: string }[]>([]);
 
   // Printer & Preview State
   const [selectedPrinter, setSelectedPrinter] = useState<any>(null);
@@ -324,7 +312,7 @@ const DashboardScreen = ({ navigation }: any) => {
       if (response.data.success) {
         const uiColors: any = {
           'Label Removal': '#3b82f6', 'Crusher': '#a855f7', 'Washing': '#06b6d4',
-          'Extrusion & Packing': '#f97316', 'Re-packaging': '#22c55e'
+          'Extrusion': '#f97316', 'Final Packaging': '#22c55e'
         };
         const mappedStations = response.data.data.map((s: any) => ({
           ...s, color: uiColors[s.name] || '#64748b',
@@ -377,37 +365,7 @@ const DashboardScreen = ({ navigation }: any) => {
   const handleEndShift = async () => {
     if (!backendShiftId) return;
     initByProducts();
-    initWaste();
     setShowEndShiftSummary(true);
-  };
-
-  const initWaste = () => {
-    const crusherStation = stations.find(s => s.name?.toLowerCase().includes('crusher') || (s as any).code === 'CRS');
-    const washingStation = stations.find(s => s.name?.toLowerCase().includes('washing') || (s as any).code === 'WSH');
-    const extrusionStation = stations.find(s => s.name?.toLowerCase().includes('extrusion') || s.id === 4 || (s as any).code === 'EXT');
-    const list: { stationId: number; stationKey: string; subLine: string; wasteType: string; weight: string }[] = [];
-    if (crusherStation) {
-      for (const sub of WASTE_CONFIG.crusher.subLines) {
-        for (const wt of WASTE_CONFIG.crusher.wasteTypes) {
-          list.push({ stationId: crusherStation.id, stationKey: 'crusher', subLine: sub, wasteType: wt, weight: '' });
-        }
-      }
-    }
-    if (washingStation) {
-      for (const sub of WASTE_CONFIG.washing.subLines) {
-        for (const wt of WASTE_CONFIG.washing.wasteTypes) {
-          list.push({ stationId: washingStation.id, stationKey: 'washing', subLine: sub, wasteType: wt, weight: '' });
-        }
-      }
-    }
-    if (extrusionStation) {
-      for (const sub of WASTE_CONFIG.extrusion.subLines) {
-        for (const wt of WASTE_CONFIG.extrusion.wasteTypes) {
-          list.push({ stationId: extrusionStation.id, stationKey: 'extrusion', subLine: sub, wasteType: wt, weight: '' });
-        }
-      }
-    }
-    setWasteInputs(list);
   };
 
   const initByProducts = () => {
@@ -415,8 +373,8 @@ const DashboardScreen = ({ navigation }: any) => {
       'Label Removal': [{ name: 'PP Cords', category: 'Sellable', weight: 0 }, { name: 'Dust', category: 'Landfill', weight: 0 }, { name: 'Floor Sweep', category: 'Landfill', weight: 0 }],
       'Crusher': [{ name: 'Spillage', category: 'Reprocess', weight: 0 }, { name: 'Off-spec Flakes', category: 'Reprocess', weight: 0 }],
       'Washing': [{ name: 'Wet Fines', category: 'Dewater & Landfill', weight: 0 }],
-      'Extrusion & Packing': [{ name: 'Looms', category: 'HIGH VALUE - Regrind', weight: 0 }, { name: 'Filtered Material', category: 'Reprocess', weight: 0 }],
-      'Re-packaging': [{ name: 'Damaged Bags', category: 'Repack', weight: 0 }, { name: 'Spillage', category: 'Reprocess', weight: 0 }]
+      'Extrusion': [{ name: 'Looms', category: 'HIGH VALUE - Regrind', weight: 0 }, { name: 'Filtered Material', category: 'Reprocess', weight: 0 }],
+      'Final Packaging': [{ name: 'Damaged Bags', category: 'Repack', weight: 0 }, { name: 'Spillage', category: 'Reprocess', weight: 0 }]
     };
     const initialByProducts: any[] = [];
     stations.forEach(s => {
@@ -463,16 +421,6 @@ const DashboardScreen = ({ navigation }: any) => {
         category: p.category ?? '',
         weight: Number(p.weight),
       }));
-      const wasteToSave = wasteInputs.filter(w => Number(w.weight) > 0).map(w => ({
-        stationId: w.stationId,
-        subLine: w.subLine,
-        wasteType: w.wasteType,
-        weight: Number(w.weight),
-      }));
-      const wasteForPdf = wasteToSave.map(w => {
-        const st = stations.find(s => s.id === w.stationId);
-        return { stationName: st?.name ?? '', subLine: w.subLine, wasteType: w.wasteType, weight: w.weight };
-      });
       await printService.printShiftSummary({
         shift: selectedShift?.name ?? 'N/A',
         operator: user?.name ?? 'N/A',
@@ -481,7 +429,6 @@ const DashboardScreen = ({ navigation }: any) => {
         totalWeight,
         byStation,
         byProducts: byProductsForPdf,
-        waste: wasteForPdf.length > 0 ? wasteForPdf : undefined,
         remark: endShiftRemark.trim() || undefined,
       });
       if (toSave.length > 0) {
@@ -492,7 +439,7 @@ const DashboardScreen = ({ navigation }: any) => {
           category: p.category ?? '',
         })));
       }
-      const response = await productionApi.endShift(backendShiftId, endShiftRemark.trim() || undefined, wasteToSave.length > 0 ? wasteToSave : undefined);
+      const response = await productionApi.endShift(backendShiftId, endShiftRemark.trim() || undefined);
       if (response.data.success) {
         const savedShiftId = backendShiftId;
         const savedMeta = {
@@ -560,7 +507,6 @@ const DashboardScreen = ({ navigation }: any) => {
       totalWeight: meta.totalWeight,
       byStation: meta.byStation,
       remark: meta.remark,
-      waste: meta.waste,
       byProducts: byProducts.map(p => ({
         name: p.name,
         stationName: p.stationName ?? '',
@@ -613,7 +559,6 @@ const DashboardScreen = ({ navigation }: any) => {
         totalWeight: d.totalWeight ?? '0.0',
         byStation: d.byStation ?? undefined,
         remark: d.remark,
-        waste: Array.isArray(d.waste) ? d.waste.map((w: any) => ({ stationName: w.stationName ?? '', subLine: w.subLine ?? '', wasteType: w.wasteType ?? '', weight: Number(w.weight) || 0 })) : undefined,
       });
       setClosedShiftByProducts((d.byProducts || []).map((p: any) => ({
         name: p.name,
@@ -699,7 +644,7 @@ const DashboardScreen = ({ navigation }: any) => {
         setWashingLogs(prev => prev.map(log => 
           log.id === editingLogWeight.id ? { ...log, weight: w } : log
         ));
-      } else if (selectedStation?.name === 'Extrusion & Packing') {
+      } else if (selectedStation?.name === 'Extrusion') {
         setExtrusionLogs(prev => prev.map(log => 
           log.id === editingLogWeight.id ? { ...log, weight: w } : log
         ));
@@ -862,7 +807,7 @@ const DashboardScreen = ({ navigation }: any) => {
       loadWashingLogs();
     }
     // Load logs when in Extrusion station view (whether sub-line is selected or not)
-    if (selectedStation?.name === 'Extrusion & Packing') {
+    if (selectedStation?.name === 'Extrusion') {
       loadExtrusionLogs();
     }
   }, [selectedSubLine, selectedDate, searchQuery, currentPage, selectedStation, selectedLineFilter, selectedStatusFilter, washingSelectedDate, washingSearchQuery, washingCurrentPage, washingSelectedLineFilter, washingSelectedStatusFilter, extrusionSelectedDate, extrusionSearchQuery, extrusionCurrentPage, extrusionSelectedLineFilter, extrusionSelectedStatusFilter]);
@@ -876,7 +821,7 @@ const DashboardScreen = ({ navigation }: any) => {
   const handleStationSelect = (station: Station) => {
     setCurrentViewBags(0);
     setCurrentViewWeight(0);
-    if (station.name === 'Label Removal' || station.name === 'Crusher' || station.name === 'Washing' || station.name === 'Extrusion & Packing') {
+    if (station.name === 'Label Removal' || station.name === 'Crusher' || station.name === 'Washing' || station.name === 'Extrusion') {
       setSelectedStation(station); setSelectedSection(null);
     } else {
       setPendingStation(station); setShowStationModal(true);
@@ -1067,7 +1012,7 @@ const DashboardScreen = ({ navigation }: any) => {
         }
         
         // For other stations (not extrusion), reset counters
-        if (selectedStation?.name !== 'Extrusion & Packing') {
+        if (selectedStation?.name !== 'Extrusion') {
           setCurrentViewBags(0);
           setCurrentViewWeight(0);
         }
@@ -1154,15 +1099,16 @@ const DashboardScreen = ({ navigation }: any) => {
           // Extrusion: "Extrusion-E1", "Extrusion-E2", or "Extrusion-E3"
           const lineNumber = selectedLogForPrint.sub_line.replace('Extrusion ', '');
           stationDisplay = `Extrusion-E${lineNumber}`;
-        } else if (selectedLogForPrint.sub_line === 'SILO' || selectedLogForPrint.sub_line === 'Mixture') {
-          stationDisplay = 'Extrusion-SILO';
+        } else if (selectedLogForPrint.sub_line === 'Mixture') {
+          // Mixture: "Extrusion-MIX"
+          stationDisplay = 'Extrusion-MIX';
         } else {
           // Crusher: "Crusher-3E" or "Crusher-Rapid"
           stationDisplay = `Crusher-${selectedLogForPrint.sub_line}`;
         }
       } else if (selectedLogForPrint.station_id === 4) {
         // Fallback for extrusion without sub_line
-        stationDisplay = 'Extrusion & Packing';
+        stationDisplay = 'Extrusion';
       }
       
       const printData = {
@@ -1287,10 +1233,8 @@ const DashboardScreen = ({ navigation }: any) => {
       case 'Label Removal': return <Box {...props} />;
       case 'Crusher': return <Package {...props} />;
       case 'Washing': return <Droplets {...props} />;
-      case 'Extrusion':
-      case 'Extrusion & Packing': return <Zap {...props} />;
-      case 'Final Packaging':
-      case 'Re-packaging': return <Box {...props} />;
+      case 'Extrusion': return <Zap {...props} />;
+      case 'Final Packaging': return <Box {...props} />;
       default: return <Package {...props} />;
     }
   };
@@ -1386,39 +1330,6 @@ const DashboardScreen = ({ navigation }: any) => {
                   </View>
                 ))
               )}
-              {closedShiftMeta?.waste && closedShiftMeta.waste.length > 0 ? (
-                <>
-                  <Text style={[styles.sectionTitle, { marginTop: 16 }]}>{t('dashboard.wasteFromMachines')}</Text>
-                  <View style={{ marginTop: 8 }}>
-                    {(['Crusher', 'Washing', 'Extrusion & Packing'] as const).map((machineName) => {
-                      const items = closedShiftMeta.waste!.filter(w => w.stationName === machineName);
-                      if (items.length === 0) return null;
-                      const bySub = items.reduce((acc: Record<string, typeof items>, w) => {
-                        const k = w.subLine || '-';
-                        if (!acc[k]) acc[k] = [];
-                        acc[k].push(w);
-                        return acc;
-                      }, {});
-                      return (
-                        <View key={machineName} style={{ marginBottom: 12 }}>
-                          <Text style={{ fontSize: 13, fontWeight: '700', color: '#334155', marginBottom: 4 }}>{machineName}</Text>
-                          {Object.entries(bySub).map(([subLine, rows]) => (
-                            <View key={subLine} style={{ marginLeft: 8, marginBottom: 6 }}>
-                              <Text style={{ fontSize: 12, fontWeight: '600', color: '#64748b' }}>{subLine === 'Mixture' ? 'SILO' : subLine}</Text>
-                              {rows.map((r, i) => (
-                                <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 2 }}>
-                                  <Text style={{ fontSize: 12, color: '#475569' }}>{r.wasteType}</Text>
-                                  <Text style={{ fontSize: 12, fontWeight: '600' }}>{r.weight} kg</Text>
-                                </View>
-                              ))}
-                            </View>
-                          ))}
-                        </View>
-                      );
-                    })}
-                  </View>
-                </>
-              ) : null}
             </View>
             <View style={{ flexDirection: 'row', marginTop: 16, marginBottom: 24 }}>
               <TouchableOpacity style={[styles.closeShiftBtn, { flex: 1, marginRight: 6 }]} onPress={handleGeneratePdfAgain}>
@@ -1485,47 +1396,6 @@ const DashboardScreen = ({ navigation }: any) => {
                 </View>
               </View>
             ))}
-            <Text style={[styles.sectionTitle, { marginTop: 20 }]}>{t('dashboard.wasteOptional')}</Text>
-            <Text style={{ fontSize: 12, color: '#64748b', marginBottom: 12 }}>{t('dashboard.wasteFromMachines')}</Text>
-            {(['crusher', 'washing', 'extrusion'] as const).map((stationKey) => {
-              const subLines = WASTE_CONFIG[stationKey].subLines;
-              const machineLabel = stationKey === 'crusher' ? t('print.crusher') : stationKey === 'washing' ? t('print.washing') : t('print.extrusion');
-              return (
-                <View key={stationKey} style={{ marginBottom: 16 }}>
-                  <Text style={{ fontSize: 14, fontWeight: '700', color: '#334155', marginBottom: 8 }}>{machineLabel}</Text>
-                  {subLines.map((subLine) => {
-                    const items = wasteInputs.filter(w => w.stationKey === stationKey && w.subLine === subLine);
-                    if (items.length === 0) return null;
-                    return (
-                      <View key={subLine} style={{ marginLeft: 8, marginBottom: 10 }}>
-                        <Text style={{ fontSize: 12, fontWeight: '600', color: '#64748b', marginBottom: 6 }}>{subLine === 'Mixture' ? 'SILO' : subLine}</Text>
-                        {items.map((item, idx) => {
-                          const globalIndex = wasteInputs.findIndex(w => w === item);
-                          const wasteLabel = item.wasteType === 'Dust Remove Label' ? t('dashboard.wasteDustRemoveLabel') : item.wasteType === 'Sweep Floor' ? t('dashboard.wasteSweepFloor') : item.wasteType === 'Dust wet' ? t('dashboard.wasteDustWet') : item.wasteType === 'Lumps' ? t('dashboard.wasteLumps') : item.wasteType;
-                          return (
-                            <View key={idx} style={[styles.byProductRow, { marginBottom: 6 }]}>
-                              <Text style={[styles.byProductName, { flex: 1, fontSize: 13 }]}>{wasteLabel}</Text>
-                              <View style={styles.byProductInputWrapper}>
-                                <TextInput
-                                  style={styles.byProductInput}
-                                  keyboardType="decimal-pad"
-                                  value={item.weight}
-                                  onChangeText={(val) => {
-                                    const next = wasteInputs.map((w, i) => i === globalIndex ? { ...w, weight: val } : w);
-                                    setWasteInputs(next);
-                                  }}
-                                />
-                                <Text style={styles.unitLabel}>kg</Text>
-                              </View>
-                            </View>
-                          );
-                        })}
-                      </View>
-                    );
-                  })}
-                </View>
-              );
-            })}
             <View style={[styles.inputGroup, { marginTop: 12 }]}>
               <Text style={styles.label}>{t('dashboard.remark')}</Text>
               <TextInput
@@ -2437,7 +2307,7 @@ const DashboardScreen = ({ navigation }: any) => {
               </React.Fragment>
                 ) : null}
           </View>
-            ) : selectedStation.name === 'Extrusion & Packing' ? (
+            ) : selectedStation.name === 'Extrusion' ? (
               <View style={styles.crusherContainer}>
                 {!selectedSubLine ? (
                   <React.Fragment>
@@ -2467,11 +2337,11 @@ const DashboardScreen = ({ navigation }: any) => {
                         </View>
                         <ChevronRight color="#CCC" size={24} />
                       </TouchableOpacity>
-                      <TouchableOpacity style={styles.selectionCard} onPress={() => { setPendingExtrusionLine('SILO'); setShowExtrusionModal(true); }}>
+                      <TouchableOpacity style={styles.selectionCard} onPress={() => { setPendingExtrusionLine('Mixture'); setShowExtrusionModal(true); }}>
                         <View style={[styles.selectionIconBox, { backgroundColor: '#dc2626' }]}><Zap color="#FFF" size={28} /></View>
                         <View style={styles.selectionText}>
-                          <Text style={styles.selectionCardTitle}>{t('dashboard.silo')}</Text>
-                          <Text style={styles.selectionCardSub}>{t('dashboard.siloLine')}</Text>
+                          <Text style={styles.selectionCardTitle}>Mixture</Text>
+                          <Text style={styles.selectionCardSub}>{t('dashboard.mixtureLine')}</Text>
                         </View>
                         <ChevronRight color="#CCC" size={24} />
                       </TouchableOpacity>
@@ -2551,10 +2421,10 @@ const DashboardScreen = ({ navigation }: any) => {
                             <Text style={[styles.filterButtonText, extrusionSelectedLineFilter === 'Extrusion 3' && styles.filterButtonTextActive]}>E3</Text>
                           </TouchableOpacity>
                           <TouchableOpacity
-                            style={[styles.filterButton, extrusionSelectedLineFilter === 'SILO' && styles.filterButtonActive]}
-                            onPress={() => { setExtrusionSelectedLineFilter('SILO'); setExtrusionCurrentPage(1); }}
+                            style={[styles.filterButton, extrusionSelectedLineFilter === 'Mixture' && styles.filterButtonActive]}
+                            onPress={() => { setExtrusionSelectedLineFilter('Mixture'); setExtrusionCurrentPage(1); }}
                           >
-                            <Text style={[styles.filterButtonText, extrusionSelectedLineFilter === 'SILO' && styles.filterButtonTextActive]}>SILO</Text>
+                            <Text style={[styles.filterButtonText, extrusionSelectedLineFilter === 'Mixture' && styles.filterButtonTextActive]}>MIX</Text>
                           </TouchableOpacity>
                         </View>
                       </View>
@@ -2633,9 +2503,9 @@ const DashboardScreen = ({ navigation }: any) => {
                                 log.sub_line === 'Extrusion 1' && { backgroundColor: '#f97316' },
                                 log.sub_line === 'Extrusion 2' && { backgroundColor: '#ea580c' },
                                 log.sub_line === 'Extrusion 3' && { backgroundColor: '#c2410c' },
-                                (log.sub_line === 'SILO' || log.sub_line === 'Mixture') && { backgroundColor: '#dc2626' }
+                                log.sub_line === 'Mixture' && { backgroundColor: '#dc2626' }
                               ]}>
-                                <Text style={styles.logBadgeText}>{log.sub_line === 'Mixture' ? 'SILO' : log.sub_line}</Text>
+                                <Text style={styles.logBadgeText}>{log.sub_line}</Text>
                               </View>
                             </View>
                           </View>
