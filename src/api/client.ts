@@ -4,7 +4,7 @@ import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 
 // Use EC2 API for app on device/emulator. Use 'localhost:3000' only for web dev.
-const API_HOST = '54.169.140.182:3000';
+const API_HOST = 'localhost:3000';
 const API_URL = `http://${API_HOST}`;
 // Local server (this repo) uses /api/auth, /api/production; EC2 uses /auth, /production.
 const API_PREFIX = (API_HOST.startsWith('localhost') || API_HOST.startsWith('127.0.0.1')) ? '/api' : '';

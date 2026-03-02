@@ -65,6 +65,52 @@ function parseDateLocal(s: string): Date {
 
 const DashboardScreen = ({ navigation }: any) => {
   const { user, logout, selectedShift } = useAuth();
+
+  // PE (Polyethylene) material flow — separate from PC, does not affect PC logic
+  const isPE = user?.role?.toLowerCase() === 'pe';
+
+  /** Output type options for a given PE raw-material sub-line */
+  const getPeOutputOptions = (subLine: string): string[] => {
+    if (subLine === 'PE SUPER') return ['Flakes PE SUPER', 'Flakes PE 1'];
+    if (subLine === 'PE 1')    return ['Flakes PE 1'];
+    if (subLine === 'EVA SUPER') return ['Flakes EVA SUPER', 'Flakes EVA 1'];
+    if (subLine === 'EVA 1')   return ['Flakes EVA 1'];
+    return [];
+  };
+
+  /** Short code used in QR generation for PE output types */
+  const getPeOutputCode = (outputType: string): string => {
+    const map: Record<string, string> = {
+      'Flakes PE SUPER': 'FPS',
+      'Flakes PE 1':     'FP1',
+      'Flakes EVA SUPER':'FES',
+      'Flakes EVA 1':    'FE1',
+      'Pellet PE SUPER': 'PPS',
+      'Pellet PE 1':     'PP1',
+      'Pellet EVA SUPER':'PES',
+      'Pellet EVA 1':    'PV1',
+    };
+    return map[outputType] || 'PE';
+  };
+
+  /**
+   * Primary flakes input label for each PE extruder product line.
+   * Additional materials are always logged as 0 (weighed at shift-end by PPIC).
+   */
+  const PE_EXTRUDER_PRIMARY: Record<string, string> = {
+    'Pellet PE SUPER':  'Flakes PE SUPER',
+    'Pellet PE 1':      'Flakes PE 1',
+    'Pellet EVA SUPER': 'Flakes EVA SUPER',
+    'Pellet EVA 1':     'Flakes EVA 1',
+  };
+
+  /** Additional (unmeasured) materials per product line — shown as 0 in app */
+  const PE_EXTRUDER_ADDITIONAL: Record<string, string[]> = {
+    'Pellet PE SUPER':  ['Flakes PE 1', 'Flakes EVA SUPER', 'Flakes EVA 1', 'Pellet PE 1', 'Pellet EVA 1'],
+    'Pellet PE 1':      [],
+    'Pellet EVA SUPER': ['Flakes PE SUPER', 'Flakes PE 1', 'Flakes EVA 1', 'Pellet PE 1', 'Pellet EVA 1'],
+    'Pellet EVA 1':     [],
+  };
   
   // App State
   const [stations, setStations] = useState<Station[]>([]);
@@ -94,7 +140,16 @@ const DashboardScreen = ({ navigation }: any) => {
   const [selectedInputBag, setSelectedInputBag] = useState<any>(null);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [isCurrentLogSaved, setIsCurrentLogSaved] = useState(false);
-  const [selectedSubLine, setSelectedSubLine] = useState<'3E' | 'Rapid' | 'Betty' | 'Washing 1' | 'Washing 2' | 'Washing 3' | 'Extrusion 1' | 'Extrusion 2' | 'Extrusion 3' | 'Mixture' | null>(null);
+  const [selectedSubLine, setSelectedSubLine] = useState<
+    '3E' | 'Rapid' | 'Betty' |
+    'Washing 1' | 'Washing 2' | 'Washing 3' |
+    'Extrusion 1' | 'Extrusion 2' | 'Extrusion 3' | 'Mixture' |
+    'PE SUPER' | 'PE 1' | 'EVA SUPER' | 'EVA 1' |
+    'Pellet PE SUPER' | 'Pellet PE 1' | 'Pellet EVA SUPER' | 'Pellet EVA 1' |
+    null
+  >(null);
+  /** PE only: selected output type (e.g. 'Flakes PE SUPER') for Crusher-Washing station */
+  const [peOutputType, setPeOutputType] = useState<string | null>(null);
   const [currentViewBags, setCurrentViewBags] = useState(0);
   const [currentViewWeight, setCurrentViewWeight] = useState(0);
   
@@ -435,12 +490,18 @@ const DashboardScreen = ({ navigation }: any) => {
       const response = await productionApi.getStations();
       if (response.data.success) {
         const uiColors: any = {
-          'Label Removal': '#3b82f6', 'Crusher': '#a855f7', 'Washing': '#06b6d4',
-          'Extrusion': '#f97316', 'Final Packaging': '#22c55e'
+          'Label Removal': '#3b82f6',
+          'Crusher': isPE ? '#0d9488' : '#a855f7',
+          'Washing': '#06b6d4',
+          'Extrusion': '#f97316',
+          'Final Packaging': '#22c55e',
         };
         const mappedStations = response.data.data.map((s: any) => ({
-          ...s, color: uiColors[s.name] || '#64748b',
-          }));
+          ...s,
+          color: uiColors[s.name] || '#64748b',
+          // For PE, rename Crusher card to "Crusher-Washing" in the UI
+          displayName: isPE && s.name === 'Crusher' ? 'Crusher-Washing' : s.name,
+        }));
         setStations(mappedStations);
       }
     } catch (error) {
@@ -523,12 +584,31 @@ const DashboardScreen = ({ navigation }: any) => {
 
   // Full list of all waste labels (all processes) with 0 weight - for showing "all labels" in closed/saved view
   const getFullWasteTemplate = useCallback((): any[] => {
+    const list: any[] = [];
+
+    if (isPE) {
+      // PE waste template: Crusher-Washing + Extruder
+      const crusherStation = stations.find(s => s.name?.toLowerCase().includes('crusher') || (s as any).code === 'CRS');
+      const extrusionStation = stations.find(s => s.name?.toLowerCase().includes('extrusion') || (s as any).code === 'EXT');
+      if (crusherStation) {
+        ['Dust', 'Sweep Floor'].forEach(name => {
+          list.push({ name, category: 'Waste', weight: 0, stationId: crusherStation.id, stationName: 'Crusher-Washing', processLabel: 'crusherWashing' });
+        });
+      }
+      if (extrusionStation) {
+        ['Lumps', 'Sweep Floor', 'Dust'].forEach(name => {
+          list.push({ name, category: 'Waste', weight: 0, stationId: extrusionStation.id, stationName: extrusionStation.name, processLabel: 'extrusion' });
+        });
+      }
+      return list;
+    }
+
+    // PC/PET waste template (unchanged)
     const labelRemovalStation = stations.find(s => s.name?.toLowerCase().includes('label removal') || (s as any).code === 'LR');
     const crusherStation = stations.find(s => s.name?.toLowerCase().includes('crusher') || (s as any).code === 'CRS');
     const washingStation = stations.find(s => s.name?.toLowerCase().includes('washing') || (s as any).code === 'WSH');
     const extrusionStation = stations.find(s => s.name?.toLowerCase().includes('extrusion') || s.id === 4 || (s as any).code === 'EXT');
     const stationForRemoveLabelCrushing = labelRemovalStation || crusherStation;
-    const list: any[] = [];
     if (stationForRemoveLabelCrushing) {
       ['Dust Remove Label', 'Sweep Floor'].forEach(name => {
         list.push({ name, category: 'Waste', weight: 0, stationId: stationForRemoveLabelCrushing.id, stationName: stationForRemoveLabelCrushing.name, processLabel: 'removeLabelCrushing' });
@@ -545,7 +625,7 @@ const DashboardScreen = ({ navigation }: any) => {
       });
     }
     return list;
-  }, [stations]);
+  }, [stations, isPE]);
 
   const mergeSavedByProductsIntoFullTemplate = useCallback((fullTemplate: any[], savedList: any[]): any[] => {
     return fullTemplate.map(t => {
@@ -1163,10 +1243,17 @@ const DashboardScreen = ({ navigation }: any) => {
         statusFilter = 'pending';
         expectedStationName = 'crusher';
       } else if (selectedSection === 'input' && (selectedStation?.id === 4 || selectedStation?.name?.toLowerCase().includes('extrusion'))) {
-        // Extrusion input: Washing batches (station_id = 3) with status pending only – same flow as Crusher→Washing
-        targetStationId = 3;
+        if (isPE) {
+          // PE Extrusion: input comes from Crusher-Washing (CRS) bags
+          const crsStation = stations.find(s => (s as any).code === 'CRS' || s.name?.toLowerCase().includes('crusher'));
+          targetStationId = crsStation?.id ?? 2;
+          expectedStationName = 'Crusher-Washing';
+        } else {
+          // PC Extrusion: input comes from Washing (WSH) bags
+          targetStationId = 3;
+          expectedStationName = 'washing';
+        }
         statusFilter = 'pending';
-        expectedStationName = 'washing';
       } else if (selectedSection === 'input' && (selectedStation?.id === 5 || selectedStation?.name?.toLowerCase().includes('final') || selectedStation?.name?.toLowerCase().includes('packing'))) {
         // Final Packaging input: Extrusion batches for PC/PET flow, Washing batches for PE flow (no Extrusion station)
         const extStation = stations.find((s: Station) => s.name?.toLowerCase().includes('extrusion') || (s as any).code === 'EXT');
@@ -1216,8 +1303,22 @@ const DashboardScreen = ({ navigation }: any) => {
     if (!weightInput || !backendShiftId || !selectedStation) return;
     try {
       setIsLoading(true);
-      setIsCurrentLogSaved(false); // Reset save state
-      const response = await productionApi.getNextQr(selectedStation.id, backendShiftId, selectedSubLine || undefined, selectedShift?.id);
+      setIsCurrentLogSaved(false);
+
+      // For PE: translate the output type / sub-line to a short QR code
+      let qrSubLine: string | undefined = selectedSubLine || undefined;
+      if (isPE) {
+        const isExtStn = selectedStation.name?.toLowerCase().includes('extrusion');
+        if (isExtStn) {
+          // Extrusion: sub-line is 'Pellet PE SUPER' | 'Pellet EVA SUPER'
+          qrSubLine = getPeOutputCode(selectedSubLine || '');
+        } else {
+          // Crusher-Washing: use peOutputType (e.g. 'Flakes PE SUPER')
+          qrSubLine = getPeOutputCode(peOutputType || '');
+        }
+      }
+
+      const response = await productionApi.getNextQr(selectedStation.id, backendShiftId, qrSubLine, selectedShift?.id);
       if (response.data.success) {
         const qrCode = response.data.data?.qrCode;
         if (!qrCode || String(qrCode).trim() === '') {
@@ -1258,6 +1359,13 @@ const DashboardScreen = ({ navigation }: any) => {
       // Use the weight captured at QR generation time (previewData.weight),
       // not the live input field which may already be cleared.
       const savedWeight = parseFloat(previewData.weight ?? weightInput);
+      // For PE: store the actual output type as sub_line for reports clarity
+      const saveSubLine = isPE
+        ? (selectedStation.name?.toLowerCase().includes('extrusion')
+            ? selectedSubLine   // e.g. 'Pellet PE SUPER'
+            : peOutputType)     // e.g. 'Flakes PE SUPER'
+        : selectedSubLine;
+
       const response = await productionApi.logProduction({
         shiftId: backendShiftId,
         stationId: selectedStation.id,
@@ -1265,7 +1373,7 @@ const DashboardScreen = ({ navigation }: any) => {
         outputBagQr: previewData.qrCode,
         weight: isNaN(savedWeight) ? 0 : savedWeight,
         status: status,
-        subLine: selectedSubLine || undefined,
+        subLine: saveSubLine || undefined,
         photoUrl: photoUrl,
         remark: remarkInput.trim() || undefined,
         shiftTypeId: selectedShift?.id
@@ -1323,18 +1431,42 @@ const DashboardScreen = ({ navigation }: any) => {
       handleBackToShifts();
       return;
     }
+
+    // ── PE-specific back navigation ─────────────────────────────────────────
+    if (isPE) {
+      if (selectedStation?.name === 'Extrusion') {
+        if (selectedSection) {
+          setSelectedSection(null);
+        } else if (selectedSubLine) {
+          setSelectedSubLine(null);
+        } else {
+          setSelectedStation(null);
+        }
+        return;
+      }
+      if (selectedStation?.name === 'Crusher') {
+        // Multiple output options (PE SUPER / EVA SUPER) → back clears output type first
+        if (peOutputType && getPeOutputOptions(selectedSubLine || '').length > 1) {
+          setPeOutputType(null);
+        } else if (selectedSubLine) {
+          setSelectedSubLine(null);
+          setPeOutputType(null);
+        } else {
+          setSelectedStation(null);
+        }
+        return;
+      }
+    }
+
+    // ── PC/PET back navigation (unchanged) ───────────────────────────────────
     if (selectedStation?.name === 'Extrusion' && selectedSubLine) {
       if (selectedSection) {
-        // Back from input/output → go to the inline section picker (keep subLine)
         setSelectedSection(null);
       } else {
-        // Back from inline section picker → go back to sub-line list
         setSelectedSubLine(null);
       }
     } else if ((selectedStation?.name === 'Crusher' || selectedStation?.name === 'Washing') && selectedSubLine) {
       if (selectedSection) {
-        // Betty: pressing back from input/output goes back to Betty's section picker
-        // Other crusher lines don't have a section picker, so also clear subLine
         setSelectedSection(null);
         if (selectedSubLine !== 'Betty') setSelectedSubLine(null);
       } else {
@@ -1345,6 +1477,7 @@ const DashboardScreen = ({ navigation }: any) => {
       else setSelectedStation(null);
       setSelectedSubLine(null);
       setSelectedSection(null);
+      setPeOutputType(null);
     }
   };
 
@@ -1482,15 +1615,20 @@ const DashboardScreen = ({ navigation }: any) => {
                                  selectedStation?.code === 'EXT';
       
       if (isExtrusionStation) {
-        // For extrusion, only search if user has typed something
         if (!text || text.trim().length === 0) {
           setSuggestedBags([]);
           setShowSuggestions(false);
           return;
         }
-        // Extrusion searches from Washing (station_id = 3) with status pending
-        targetStationId = 3; // Washing station ID
-        statusFilter = 'pending'; // Only show pending washing batches
+        if (isPE) {
+          // PE Extrusion: input comes from Crusher-Washing (CRS) pending bags
+          const crsStation = stations.find(s => (s as any).code === 'CRS' || s.name?.toLowerCase().includes('crusher'));
+          targetStationId = crsStation?.id ?? 2;
+        } else {
+          // PC Extrusion: input comes from Washing (WSH) pending bags
+          targetStationId = 3;
+        }
+        statusFilter = 'pending';
         const response = await productionApi.searchLogs(text, targetStationId, selectedStation.id, statusFilter);
         if (response.data.success) { 
           setSuggestedBags(response.data.data); 
@@ -2099,7 +2237,7 @@ const DashboardScreen = ({ navigation }: any) => {
             {stations.map((s) => (
               <TouchableOpacity key={s.id} style={styles.stationCard} onPress={() => handleStationSelect(s)}>
                 <View style={[styles.stationIconBox, { backgroundColor: s.color }]}>{renderStationIcon(s.name, s.color)}</View>
-                <View style={styles.stationInfo}><Text style={styles.stationName}>{s.name}</Text><Text style={styles.stationDesc} numberOfLines={1}>{s.description}</Text></View>
+                <View style={styles.stationInfo}><Text style={styles.stationName}>{(s as any).displayName || s.name}</Text><Text style={styles.stationDesc} numberOfLines={1}>{s.description}</Text></View>
                 <View style={styles.stationMiniStats}><Text style={styles.miniStat}>{shiftLogs.filter(l => l.station_id === s.id).length} bags</Text></View>
                 <ChevronRight color="#CCC" size={20} />
               </TouchableOpacity>
@@ -2144,7 +2282,181 @@ const DashboardScreen = ({ navigation }: any) => {
               </View>
             ) : selectedStation.name === 'Crusher' ? (
               <View style={styles.crusherContainer}>
-                {!selectedSubLine ? (
+                {/* ══════════════════════════════════════════════════════════
+                    PE CRUSHER-WASHING FLOW
+                    Step 1 → select raw material sub-line
+                    Step 2 → select output type (if multiple options)
+                    Step 3 → enter weight, generate QR, print
+                    ══════════════════════════════════════════════════════════ */}
+                {isPE ? (
+                  <>
+                    {/* Hero header */}
+                    <View style={[styles.stationHero, { backgroundColor: selectedStation.color, paddingBottom: 20, marginBottom: 0 }]}>
+                      <View style={styles.heroHeader}>
+                        <View style={styles.heroIconCircle}>
+                          {renderStationIcon(selectedStation.name, selectedStation.color)}
+                        </View>
+                        <View style={{ marginLeft: 15, flex: 1 }}>
+                          <Text style={styles.heroTitle}>Crusher-Washing</Text>
+                          <Text style={styles.heroDesc}>PE flakes production</Text>
+                        </View>
+                      </View>
+                    </View>
+
+                    {/* Step 1: Select raw material */}
+                    {!selectedSubLine && (
+                      <View style={styles.selectionContainer}>
+                        <Text style={styles.selectionTitle}>Select Raw Material</Text>
+                        {(['PE SUPER', 'PE 1', 'EVA SUPER', 'EVA 1'] as const).map((mat, idx) => {
+                          const colors = ['#0d9488', '#0891b2', '#7c3aed', '#db2777'];
+                          return (
+                            <TouchableOpacity key={mat} style={styles.selectionCard}
+                              onPress={() => {
+                                setSelectedSubLine(mat);
+                                // Single-output types: auto-set output type
+                                const opts = getPeOutputOptions(mat);
+                                if (opts.length === 1) setPeOutputType(opts[0]);
+                                else setPeOutputType(null);
+                              }}>
+                              <View style={[styles.selectionIconBox, { backgroundColor: colors[idx] }]}>
+                                <Package color="#FFF" size={28} />
+                              </View>
+                              <View style={styles.selectionText}>
+                                <Text style={styles.selectionCardTitle}>{mat}</Text>
+                                <Text style={styles.selectionCardSub}>{getPeOutputOptions(mat).join(' / ')}</Text>
+                              </View>
+                              <ChevronRight color="#CCC" size={24} />
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                    )}
+
+                    {/* Step 2: Select output type (only when multiple options exist) */}
+                    {selectedSubLine && !peOutputType && getPeOutputOptions(selectedSubLine).length > 1 && (
+                      <View style={styles.selectionContainer}>
+                        <Text style={styles.selectionTitle}>Select Output Type</Text>
+                        <View style={[styles.sublineBadgeWrapper, { marginBottom: 8 }]}>
+                          <View style={[styles.sublineBadge, { backgroundColor: '#CCFBF1', borderColor: '#99F6E4' }]}>
+                            <Text style={[styles.sublineBadgeText, { color: '#0d9488' }]}>Raw Material: {selectedSubLine}</Text>
+                          </View>
+                        </View>
+                        {getPeOutputOptions(selectedSubLine).map((opt, idx) => (
+                          <TouchableOpacity key={opt} style={styles.selectionCard}
+                            onPress={() => setPeOutputType(opt)}>
+                            <View style={[styles.selectionIconBox, { backgroundColor: idx === 0 ? '#0d9488' : '#64748b' }]}>
+                              <Package color="#FFF" size={28} />
+                            </View>
+                            <View style={styles.selectionText}>
+                              <Text style={styles.selectionCardTitle}>{opt}</Text>
+                              <Text style={styles.selectionCardSub}>{idx === 0 ? 'Primary output' : 'Alternative output'}</Text>
+                            </View>
+                            <ChevronRight color="#CCC" size={24} />
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    )}
+
+                    {/* Step 3: Weight entry + QR generation */}
+                    {selectedSubLine && peOutputType && (
+                      <View style={{ paddingHorizontal: 16, paddingTop: 16 }}>
+                        <View style={[styles.sublineBadgeWrapper, { paddingHorizontal: 0, marginBottom: 12 }]}>
+                          <View style={[styles.sublineBadge, { backgroundColor: '#CCFBF1', borderColor: '#99F6E4' }]}>
+                            <Text style={[styles.sublineBadgeText, { color: '#0d9488' }]}>
+                              {selectedSubLine} → {peOutputType}
+                            </Text>
+                          </View>
+                        </View>
+
+                        {/* Input: continuous, no scanning */}
+                        <View style={styles.sectionCard}>
+                          <View style={styles.sectionHeaderRow}>
+                            <View style={[styles.typePill, { backgroundColor: '#E0F2FE' }]}>
+                              <Text style={[styles.typePillText, { color: '#0369A1' }]}>INPUT</Text>
+                            </View>
+                            <Text style={styles.sectionTitleText}>Continuous — no scanning required</Text>
+                          </View>
+                          <View style={styles.grayEmptyBox}>
+                            <Text style={styles.grayEmptyText}>Crusher-Washing is one combined process for PE</Text>
+                          </View>
+                        </View>
+
+                        {/* Output: weight + QR */}
+                        <View style={styles.sectionCard}>
+                          <View style={styles.sectionHeaderRow}>
+                            <View style={[styles.typePill, { backgroundColor: '#DCFCE7' }]}>
+                              <Text style={[styles.typePillText, { color: '#15803D' }]}>OUTPUT</Text>
+                            </View>
+                            <Text style={styles.sectionTitleText}>{peOutputType}</Text>
+                          </View>
+                          <View style={styles.inputGroup}>
+                            <Text style={styles.label}>Weight (kg)</Text>
+                            <View style={styles.inputWithIcon}>
+                              <TextInput
+                                style={[styles.input, { flex: 1 }]}
+                                placeholder="Enter weight"
+                                placeholderTextColor="#999"
+                                keyboardType="numeric"
+                                value={weightInput}
+                                onChangeText={setWeightInput}
+                              />
+                              <TouchableOpacity style={styles.iconInsideInput}>
+                                <Scale size={20} color="#666" />
+                              </TouchableOpacity>
+                            </View>
+                          </View>
+                          <TouchableOpacity style={styles.secondaryButton} onPress={handleTakePhoto}>
+                            <CameraIcon size={20} color="#475569" />
+                            <Text style={styles.secondaryButtonText}>Take Photo</Text>
+                          </TouchableOpacity>
+                          {capturedImages.length > 0 && (
+                            <ScrollView horizontal showsHorizontalScrollIndicator={false}
+                              style={styles.photosPreviewContainer} contentContainerStyle={styles.photosPreviewContent}>
+                              {capturedImages.map((imageUri, index) => (
+                                <View key={index} style={styles.photoPreviewItem}>
+                                  <Image source={{ uri: imageUri }} style={styles.photoPreviewThumbnail} />
+                                  <TouchableOpacity style={styles.removePhotoButton}
+                                    onPress={() => setCapturedImages(prev => prev.filter((_, i) => i !== index))}>
+                                    <X size={16} color="#FFF" />
+                                  </TouchableOpacity>
+                                </View>
+                              ))}
+                            </ScrollView>
+                          )}
+                          <TouchableOpacity
+                            style={[styles.primaryButton, (!weightInput || isLoading) && { opacity: 0.5, backgroundColor: '#E2E8F0' }]}
+                            onPress={handleLogProduction}
+                            disabled={!weightInput || isLoading}>
+                            {isLoading ? <ActivityIndicator color="#666" /> : <PrinterIcon size={20} color={!weightInput ? '#94A3B8' : '#FFF'} />}
+                            <Text style={[styles.primaryButtonText, !weightInput && { color: '#94A3B8' }]}>Generate QR & Print</Text>
+                          </TouchableOpacity>
+                        </View>
+
+                        {/* Shift progress */}
+                        <View style={styles.progressCardRedesign}>
+                          <Text style={styles.progressTitleRedesign}>Shift Progress — {peOutputType}</Text>
+                          <View style={styles.progressDataRow}>
+                            <Text style={styles.progressDataLabel}>Outputs this shift</Text>
+                            <Text style={styles.progressDataValue}>
+                              {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === peOutputType).length} bags
+                            </Text>
+                          </View>
+                          <View style={styles.progressDataRow}>
+                            <Text style={styles.progressDataLabel}>Total weight</Text>
+                            <Text style={styles.progressDataValue}>
+                              {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === peOutputType)
+                                .reduce((acc: number, l: any) => acc + Number(l.weight || 0), 0).toFixed(1)} kg
+                            </Text>
+                          </View>
+                        </View>
+                      </View>
+                    )}
+                  </>
+                ) : (
+                /* ══════════════════════════════════════════════════════════
+                    PC CRUSHER FLOW (unchanged)
+                    ══════════════════════════════════════════════════════════ */
+                !selectedSubLine ? (
                   <View style={styles.selectionContainer}>
                     <Text style={styles.selectionTitle}>Select Crusher Line</Text>
                     <TouchableOpacity style={styles.selectionCard} onPress={() => setSelectedSubLine('3E')}>
@@ -2671,7 +2983,9 @@ const DashboardScreen = ({ navigation }: any) => {
                   </View>
                 </View>
                   </>
-                  )}
+                  )
+                )
+              }
               </View>
             ) : selectedStation.name === 'Washing' ? (
               <View style={styles.crusherContainer}>
@@ -3121,7 +3435,271 @@ const DashboardScreen = ({ navigation }: any) => {
           </View>
             ) : selectedStation.name === 'Extrusion' ? (
               <View style={styles.crusherContainer}>
-                {!selectedSubLine ? (
+                {/* ══════════════════════════════════════════════════════════
+                    PE EXTRUDER FLOW
+                    Step 1 → select product line (Pellet PE SUPER / EVA SUPER)
+                    Step 2 → input/output section picker
+                    Step 3a input  → scan primary flakes bag from CRS
+                    Step 3b output → enter weight, generate QR, print
+                    ══════════════════════════════════════════════════════════ */}
+                {isPE ? (
+                  <>
+                    {/* Hero header */}
+                    <View style={[styles.stationHero, { backgroundColor: selectedStation.color, paddingBottom: 20, marginBottom: 0 }]}>
+                      <View style={styles.heroHeader}>
+                        <View style={styles.heroIconCircle}>
+                          {renderStationIcon(selectedStation.name, selectedStation.color)}
+                        </View>
+                        <View style={{ marginLeft: 15, flex: 1 }}>
+                          <Text style={styles.heroTitle}>Extruder (PE)</Text>
+                          <Text style={styles.heroDesc}>Pellet production</Text>
+                        </View>
+                      </View>
+                    </View>
+
+                    {/* Step 1: Select product line — all 4 outputs, sellable marker shown */}
+                    {!selectedSubLine && (
+                      <View style={styles.selectionContainer}>
+                        <Text style={styles.selectionTitle}>Select Output Product Line</Text>
+                        {([
+                          { line: 'Pellet PE SUPER',  primary: 'Flakes PE SUPER',  color: '#f97316', sellable: true  },
+                          { line: 'Pellet PE 1',      primary: 'Flakes PE 1',      color: '#ea580c', sellable: false },
+                          { line: 'Pellet EVA SUPER', primary: 'Flakes EVA SUPER', color: '#9333ea', sellable: true  },
+                          { line: 'Pellet EVA 1',     primary: 'Flakes EVA 1',     color: '#7c3aed', sellable: false },
+                        ] as const).map(({ line, primary, color, sellable }) => (
+                          <TouchableOpacity key={line} style={styles.selectionCard}
+                            onPress={() => { setSelectedSubLine(line as any); setSelectedSection(null); }}>
+                            <View style={[styles.selectionIconBox, { backgroundColor: color }]}>
+                              <Zap color="#FFF" size={28} />
+                            </View>
+                            <View style={styles.selectionText}>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                <Text style={styles.selectionCardTitle}>{line}</Text>
+                                {sellable && (
+                                  <View style={{ backgroundColor: '#dcfce7', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1 }}>
+                                    <Text style={{ fontSize: 10, color: '#166534', fontWeight: '700' }}>SELLABLE</Text>
+                                  </View>
+                                )}
+                              </View>
+                              <Text style={styles.selectionCardSub}>Primary input: {primary}</Text>
+                            </View>
+                            <ChevronRight color="#CCC" size={24} />
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    )}
+
+                    {/* Step 2: Input / Output section picker */}
+                    {selectedSubLine && !selectedSection && (
+                      <View style={styles.selectionContainer}>
+                        <View style={[styles.sublineBadgeWrapper, { marginBottom: 8 }]}>
+                          <View style={[styles.sublineBadge, { backgroundColor: '#FFF7ED', borderColor: '#FED7AA' }]}>
+                            <Text style={[styles.sublineBadgeText, { color: '#f97316' }]}>{selectedSubLine}</Text>
+                          </View>
+                        </View>
+                        <Text style={styles.selectionTitle}>Select Section</Text>
+                        <TouchableOpacity style={styles.selectionCard}
+                          onPress={() => setSelectedSection('input')}>
+                          <View style={[styles.selectionIconBox, { backgroundColor: '#0ea5e9' }]}>
+                            <Package color="#FFF" size={28} />
+                          </View>
+                          <View style={styles.selectionText}>
+                            <Text style={styles.selectionCardTitle}>Input</Text>
+                            <Text style={styles.selectionCardSub}>Scan primary flakes bag</Text>
+                          </View>
+                          <ChevronRight color="#CCC" size={24} />
+                        </TouchableOpacity>
+                        <TouchableOpacity style={styles.selectionCard}
+                          onPress={() => setSelectedSection('output')}>
+                          <View style={[styles.selectionIconBox, { backgroundColor: '#22c55e' }]}>
+                            <Box color="#FFF" size={28} />
+                          </View>
+                          <View style={styles.selectionText}>
+                            <Text style={styles.selectionCardTitle}>Output</Text>
+                            <Text style={styles.selectionCardSub}>Enter weight & generate QR</Text>
+                          </View>
+                          <ChevronRight color="#CCC" size={24} />
+                        </TouchableOpacity>
+                      </View>
+                    )}
+
+                    {/* Step 3a: Input — scan PRIMARY flakes bag + show additional materials (always 0) */}
+                    {selectedSubLine && selectedSection === 'input' && (
+                      <View style={{ paddingHorizontal: 16, paddingTop: 16 }}>
+                        <View style={[styles.sublineBadgeWrapper, { paddingHorizontal: 0, marginBottom: 12 }]}>
+                          <View style={[styles.sublineBadge, { backgroundColor: '#FFF7ED', borderColor: '#FED7AA' }]}>
+                            <Text style={[styles.sublineBadgeText, { color: '#f97316' }]}>
+                              {selectedSubLine} — Input
+                            </Text>
+                          </View>
+                        </View>
+
+                        {/* Primary material: scan QR bag */}
+                        <View style={styles.sectionCard}>
+                          <View style={styles.sectionHeaderRow}>
+                            <View style={[styles.typePill, { backgroundColor: '#DCFCE7' }]}>
+                              <Text style={[styles.typePillText, { color: '#15803D' }]}>PRIMARY</Text>
+                            </View>
+                            <Text style={styles.sectionTitleText}>
+                              {PE_EXTRUDER_PRIMARY[selectedSubLine] || 'Flakes bag'}
+                            </Text>
+                          </View>
+                          {selectedInputBag ? (
+                            <View style={styles.selectedBagCard}>
+                              <View style={styles.selectedBagInfo}>
+                                <Text style={styles.selectedBagQr}>{selectedInputBag.output_bag_qr}</Text>
+                                <Text style={styles.selectedBagWeight}>{selectedInputBag.weight} kg</Text>
+                              </View>
+                              <TouchableOpacity onPress={() => setSelectedInputBag(null)}>
+                                <X size={20} color="#ef4444" />
+                              </TouchableOpacity>
+                            </View>
+                          ) : (
+                            <>
+                              <View style={styles.inputWithIcon}>
+                                <TextInput
+                                  style={[styles.input, { flex: 1 }]}
+                                  placeholder={`Search or scan ${PE_EXTRUDER_PRIMARY[selectedSubLine] || 'flakes'} QR...`}
+                                  placeholderTextColor="#999"
+                                  value={bagSearchQuery}
+                                  onChangeText={(text) => { setBagSearchQuery(text); onBagSearch(text); }}
+                                />
+                                <TouchableOpacity style={styles.iconInsideInput}
+                                  onPress={() => { setShowScanner(true); setScanned(false); }}>
+                                  <ScanLine size={20} color="#666" />
+                                </TouchableOpacity>
+                              </View>
+                              {showSuggestions && suggestedBags.length > 0 && (
+                                <View style={styles.suggestionsContainer}>
+                                  {suggestedBags.map((bag: any, idx: number) => (
+                                    <TouchableOpacity key={idx} style={styles.suggestionItem}
+                                      onPress={() => {
+                                        setSelectedInputBag({ output_bag_qr: bag.output_bag_qr, weight: bag.weight });
+                                        setSuggestedBags([]);
+                                        setShowSuggestions(false);
+                                        setBagSearchQuery('');
+                                      }}>
+                                      <Text style={styles.suggestionQr}>{bag.output_bag_qr}</Text>
+                                      <Text style={styles.suggestionWeight}>{bag.weight} kg</Text>
+                                    </TouchableOpacity>
+                                  ))}
+                                </View>
+                              )}
+                            </>
+                          )}
+                        </View>
+
+                        {/* Additional materials — always 0 (weighed at shift-end by PPIC) */}
+                        {(PE_EXTRUDER_ADDITIONAL[selectedSubLine] || []).length > 0 && (
+                          <View style={[styles.sectionCard, { marginTop: 8 }]}>
+                            <View style={styles.sectionHeaderRow}>
+                              <View style={[styles.typePill, { backgroundColor: '#F1F5F9' }]}>
+                                <Text style={[styles.typePillText, { color: '#64748b' }]}>ADDITIONAL</Text>
+                              </View>
+                              <Text style={styles.sectionTitleText}>Input = 0 (weighed at shift end)</Text>
+                            </View>
+                            <View style={{ backgroundColor: '#F8FAFC', borderRadius: 8, padding: 10, marginTop: 6 }}>
+                              <Text style={{ fontSize: 11, color: '#94a3b8', marginBottom: 6 }}>
+                                These materials are added unmeasured during production.{'\n'}
+                                PPIC weighs remaining stock at shift end to calculate usage.
+                              </Text>
+                              {(PE_EXTRUDER_ADDITIONAL[selectedSubLine] || []).map((mat: string) => (
+                                <View key={mat} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' }}>
+                                  <Text style={{ fontSize: 13, color: '#475569' }}>{mat}</Text>
+                                  <Text style={{ fontSize: 13, color: '#94a3b8', fontWeight: '600' }}>0 kg</Text>
+                                </View>
+                              ))}
+                            </View>
+                          </View>
+                        )}
+                      </View>
+                    )}
+
+                    {/* Step 3b: Output — enter weight, generate QR, print */}
+                    {selectedSubLine && selectedSection === 'output' && (
+                      <View style={{ paddingHorizontal: 16, paddingTop: 16 }}>
+                        <View style={[styles.sublineBadgeWrapper, { paddingHorizontal: 0, marginBottom: 12 }]}>
+                          <View style={[styles.sublineBadge, { backgroundColor: '#FFF7ED', borderColor: '#FED7AA' }]}>
+                            <Text style={[styles.sublineBadgeText, { color: '#f97316' }]}>
+                              {selectedSubLine} — Output
+                            </Text>
+                          </View>
+                        </View>
+                        <View style={styles.sectionCard}>
+                          <View style={styles.sectionHeaderRow}>
+                            <View style={[styles.typePill, { backgroundColor: '#DCFCE7' }]}>
+                              <Text style={[styles.typePillText, { color: '#15803D' }]}>OUTPUT</Text>
+                            </View>
+                            <Text style={styles.sectionTitleText}>{selectedSubLine}</Text>
+                          </View>
+                          <View style={styles.inputGroup}>
+                            <Text style={styles.label}>Weight (kg)</Text>
+                            <View style={styles.inputWithIcon}>
+                              <TextInput
+                                style={[styles.input, { flex: 1 }]}
+                                placeholder="Enter output weight"
+                                placeholderTextColor="#999"
+                                keyboardType="numeric"
+                                value={weightInput}
+                                onChangeText={setWeightInput}
+                              />
+                              <TouchableOpacity style={styles.iconInsideInput}>
+                                <Scale size={20} color="#666" />
+                              </TouchableOpacity>
+                            </View>
+                          </View>
+                          <TouchableOpacity style={styles.secondaryButton} onPress={handleTakePhoto}>
+                            <CameraIcon size={20} color="#475569" />
+                            <Text style={styles.secondaryButtonText}>Take Photo</Text>
+                          </TouchableOpacity>
+                          {capturedImages.length > 0 && (
+                            <ScrollView horizontal showsHorizontalScrollIndicator={false}
+                              style={styles.photosPreviewContainer} contentContainerStyle={styles.photosPreviewContent}>
+                              {capturedImages.map((imageUri, index) => (
+                                <View key={index} style={styles.photoPreviewItem}>
+                                  <Image source={{ uri: imageUri }} style={styles.photoPreviewThumbnail} />
+                                  <TouchableOpacity style={styles.removePhotoButton}
+                                    onPress={() => setCapturedImages(prev => prev.filter((_, i) => i !== index))}>
+                                    <X size={16} color="#FFF" />
+                                  </TouchableOpacity>
+                                </View>
+                              ))}
+                            </ScrollView>
+                          )}
+                          <TouchableOpacity
+                            style={[styles.primaryButton, (!weightInput || isLoading) && { opacity: 0.5, backgroundColor: '#E2E8F0' }]}
+                            onPress={handleLogProduction}
+                            disabled={!weightInput || isLoading}>
+                            {isLoading ? <ActivityIndicator color="#666" /> : <PrinterIcon size={20} color={!weightInput ? '#94A3B8' : '#FFF'} />}
+                            <Text style={[styles.primaryButtonText, !weightInput && { color: '#94A3B8' }]}>Generate QR & Print</Text>
+                          </TouchableOpacity>
+                        </View>
+
+                        {/* Shift progress */}
+                        <View style={styles.progressCardRedesign}>
+                          <Text style={styles.progressTitleRedesign}>Shift Progress — {selectedSubLine}</Text>
+                          <View style={styles.progressDataRow}>
+                            <Text style={styles.progressDataLabel}>Outputs this shift</Text>
+                            <Text style={styles.progressDataValue}>
+                              {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === selectedSubLine).length} bags
+                            </Text>
+                          </View>
+                          <View style={styles.progressDataRow}>
+                            <Text style={styles.progressDataLabel}>Total weight</Text>
+                            <Text style={styles.progressDataValue}>
+                              {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === selectedSubLine)
+                                .reduce((acc: number, l: any) => acc + Number(l.weight || 0), 0).toFixed(1)} kg
+                            </Text>
+                          </View>
+                        </View>
+                      </View>
+                    )}
+                  </>
+                ) : (
+                /* ══════════════════════════════════════════════════════════
+                    PC EXTRUSION FLOW (unchanged)
+                    ══════════════════════════════════════════════════════════ */
+                !selectedSubLine ? (
                   <React.Fragment>
                     <View style={styles.selectionContainer}>
                       <Text style={styles.selectionTitle}>Select Extrusion Line</Text>
@@ -3590,7 +4168,9 @@ const DashboardScreen = ({ navigation }: any) => {
                   </View>
                 </View>
               </React.Fragment>
-                ) : null}
+                ) : null
+              )
+            }
           </View>
             ) : (
               <>
