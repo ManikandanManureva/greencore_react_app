@@ -1,6 +1,7 @@
 import React, { createContext, useState, useContext, useEffect } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import client from '../api/client';
+import { productionApi, masterDataApi } from '../api/production';
 
 interface User {
   id: number;
@@ -83,15 +84,35 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (refreshToken) {
           await AsyncStorage.setItem('refresh_token', refreshToken);
         }
-        
         setUser(userData);
+
+        // ── Auto-restore active shift so ShiftSelection is skipped ──
+        try {
+          const [activeRes, shiftsRes] = await Promise.all([
+            productionApi.getActiveShift(),
+            masterDataApi.getShifts(),
+          ]);
+          if (activeRes.data.success && activeRes.data.data) {
+            const activeSession = activeRes.data.data;
+            const shiftType = shiftsRes.data.data?.find(
+              (s: any) => s.id === activeSession.shift_type_id
+            );
+            if (shiftType) {
+              await AsyncStorage.setItem('selected_shift', JSON.stringify(shiftType));
+              setSelectedShiftState(shiftType);
+            }
+          }
+        } catch (shiftErr) {
+          // Non-critical: if this fails user just sees ShiftSelection screen
+          console.warn('Could not restore active shift on login:', shiftErr);
+        }
+
         return response.data;
       } else {
         throw new Error(response.data.message || 'Login failed');
       }
     } catch (error: any) {
       console.error('Login error:', error);
-      // Extract error message from response if available
       const errorMessage = error.response?.data?.message || error.message || 'Login failed. Please check your credentials.';
       throw new Error(errorMessage);
     }

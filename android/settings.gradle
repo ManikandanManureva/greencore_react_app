@@ -1,8 +1,39 @@
 pluginManagement {
+  // Resolve node: NODE_BIN env, or search PATH, or common macOS paths (Gradle often can't find "node" by name)
+  def nodeCmd = "node"
+  if (System.getenv("NODE_BIN")) {
+    nodeCmd = System.getenv("NODE_BIN")
+  } else {
+    def pathStr = System.getenv("PATH") ?: ""
+    def pathSep = System.getProperty("path.separator") ?: ":"
+    for (def entry in pathStr.split(pathSep)) {
+      def nodeFile = new File(entry.trim(), "node")
+      if (nodeFile.exists() && nodeFile.canExecute()) {
+        nodeCmd = nodeFile.absolutePath
+        break
+      }
+    }
+    if (nodeCmd == "node") {
+      def home = System.getenv("HOME") ?: ""
+      for (def cand : ["/opt/homebrew/bin/node", "/usr/local/bin/node"]) {
+        if (new File(cand).exists()) { nodeCmd = cand; break }
+      }
+      if (nodeCmd == "node" && home) {
+        def nvmNode = new File(home, ".nvm/versions/node")
+        if (nvmNode.isDirectory()) {
+          def vers = nvmNode.listFiles()?.findAll { it.isDirectory() }?.sort { a, b -> b.name <=> a.name }
+          for (def ver in (vers ?: [])) {
+            def n = new File(ver, "bin/node")
+            if (n.exists()) { nodeCmd = n.absolutePath; break }
+          }
+        }
+      }
+    }
+  }
   def reactNativeGradlePlugin = new File(
     providers.exec {
       workingDir(rootDir)
-      commandLine("node", "--print", "require.resolve('@react-native/gradle-plugin/package.json', { paths: [require.resolve('react-native/package.json')] })")
+      commandLine(nodeCmd, "--print", "require.resolve('@react-native/gradle-plugin/package.json', { paths: [require.resolve('react-native/package.json')] })")
     }.standardOutput.asText.get().trim()
   ).getParentFile().absolutePath
   includeBuild(reactNativeGradlePlugin)
@@ -10,7 +41,7 @@ pluginManagement {
   def expoPluginsPath = new File(
     providers.exec {
       workingDir(rootDir)
-      commandLine("node", "--print", "require.resolve('expo-modules-autolinking/package.json', { paths: [require.resolve('expo/package.json')] })")
+      commandLine(nodeCmd, "--print", "require.resolve('expo-modules-autolinking/package.json', { paths: [require.resolve('expo/package.json')] })")
     }.standardOutput.asText.get().trim(),
     "../android/expo-gradle-plugin"
   ).absolutePath

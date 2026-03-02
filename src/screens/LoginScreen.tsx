@@ -9,7 +9,6 @@ import {
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
-  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Eye, EyeOff } from 'lucide-react-native';
@@ -22,6 +21,7 @@ const LoginScreen = () => {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [currentLanguage, setCurrentLanguage] = useState<Language>(i18n.getLanguage());
   const { login } = useAuth();
 
@@ -34,8 +34,9 @@ const LoginScreen = () => {
   }, []);
 
   const handleLogin = async () => {
+    setErrorMessage(null);
     if (!employeeId || !password) {
-      Alert.alert(t('common.error'), t('login.errorEmpty'));
+      setErrorMessage(t('login.errorEmpty'));
       return;
     }
 
@@ -43,7 +44,8 @@ const LoginScreen = () => {
     try {
       await login(employeeId, password);
     } catch (error: any) {
-      Alert.alert(t('login.errorFailed'), error.message || t('login.errorMessage'));
+      const msg = error.message || t('login.errorMessage');
+      setErrorMessage(msg);
     } finally {
       setLoading(false);
     }
@@ -82,7 +84,7 @@ const LoginScreen = () => {
                 style={styles.input}
                 placeholder={t('login.employeeIdPlaceholder')}
                 value={employeeId}
-                onChangeText={setEmployeeId}
+                onChangeText={(v) => { setEmployeeId(v); setErrorMessage(null); }}
                 autoCapitalize="characters"
               />
             </View>
@@ -93,9 +95,9 @@ const LoginScreen = () => {
                 <TextInput
                   style={[styles.input, { paddingRight: 45 }]}
                   placeholder={t('login.passwordPlaceholder')}
-                  value={password}
-                  onChangeText={setPassword}
-                  secureTextEntry={!showPassword}
+                value={password}
+                onChangeText={(v) => { setPassword(v); setErrorMessage(null); }}
+                secureTextEntry={!showPassword}
                 />
                 <TouchableOpacity
                   style={styles.eyeIcon}
@@ -109,6 +111,12 @@ const LoginScreen = () => {
                 </TouchableOpacity>
               </View>
             </View>
+
+            {errorMessage ? (
+              <View style={styles.errorBox}>
+                <Text style={styles.errorText}>{errorMessage}</Text>
+              </View>
+            ) : null}
 
             <TouchableOpacity
               style={styles.loginButton}
@@ -224,12 +232,28 @@ const styles = StyleSheet.create({
     right: 12,
     top: 12,
   },
+  errorBox: {
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    marginTop: 4,
+    marginBottom: 4,
+  },
+  errorText: {
+    color: '#DC2626',
+    fontSize: 13,
+    fontWeight: '500',
+    textAlign: 'center',
+  },
   loginButton: {
     backgroundColor: '#17a34a',
     borderRadius: 10,
     padding: 16,
     alignItems: 'center',
-    marginTop: 24,
+    marginTop: 16,
     shadowColor: '#17a34a',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.3,

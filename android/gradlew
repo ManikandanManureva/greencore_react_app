@@ -1,5 +1,13 @@
 #!/bin/sh
 
+# Ensure node is on PATH for Expo/React Native (fixes "command 'node'" when PATH is minimal)
+NODE_DIR=""
+if [ -n "$NODE_BIN" ]; then NODE_DIR=$(dirname "$NODE_BIN" 2>/dev/null); fi
+if [ -z "$NODE_DIR" ] || [ ! -x "$NODE_DIR/node" ]; then
+  NODE_CMD=$(command -v node 2>/dev/null) && NODE_DIR=$(dirname "$NODE_CMD")
+fi
+if [ -n "$NODE_DIR" ] && [ -x "$NODE_DIR/node" ]; then export PATH="$NODE_DIR:$PATH"; fi
+
 #
 # Copyright © 2015-2021 the original authors.
 #

@@ -1,13 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Allow cleartext (HTTP) traffic to the API server -->
+    <!-- Allow cleartext (HTTP) traffic to API servers -->
     <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">54.169.140.182</domain>
         <domain includeSubdomains="true">13.214.29.7</domain>
         <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">127.0.0.1</domain>
         <domain includeSubdomains="true">10.0.2.2</domain>
     </domain-config>
-    
-    <!-- Default: trust system certificates -->
+
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />

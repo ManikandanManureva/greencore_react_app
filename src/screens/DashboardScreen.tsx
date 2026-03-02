@@ -39,7 +39,7 @@ import {
   Pencil,
 } from 'lucide-react-native';
 import { useAuth } from '../navigation/AuthContext';
-import { productionApi } from '../api/production';
+import { productionApi, masterDataApi } from '../api/production';
 import { Station, ProductionLog, Shift } from '../types';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { CameraView, Camera } from 'expo-camera';
@@ -150,6 +150,7 @@ const DashboardScreen = ({ navigation }: any) => {
   // Summary State
   const [showEndShiftSummary, setShowEndShiftSummary] = useState(false);
   const [byProductsInputs, setByProductsInputs] = useState<any[]>([]);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Shift-closed view (editable by-products, regenerate PDF)
   const [showShiftClosedView, setShowShiftClosedView] = useState(false);
@@ -159,16 +160,37 @@ const DashboardScreen = ({ navigation }: any) => {
   const [closedByProductsLoading, setClosedByProductsLoading] = useState(false);
   const [editingByProductIndex, setEditingByProductIndex] = useState<number | null>(null);
   const [editByProductWeight, setEditByProductWeight] = useState('');
-  
+  const [closedShiftRemarkEdit, setClosedShiftRemarkEdit] = useState('');
+  const [closedShiftLogs, setClosedShiftLogs] = useState<any[]>([]);
+  const [closedShiftLogsLoading, setClosedShiftLogsLoading] = useState(false);
+  // PPIC shift detail: search + per-category pagination (10 rows/page)
+  const [shiftLogsSearch, setShiftLogsSearch] = useState('');
+  const [shiftLogsPageCrusher, setShiftLogsPageCrusher] = useState(1);
+  const [shiftLogsPageWashing, setShiftLogsPageWashing] = useState(1);
+  const [shiftLogsPageExtrusion, setShiftLogsPageExtrusion] = useState(1);
+  const SHIFT_LOGS_PAGE_SIZE = 10;
+
   // PPIC: list and open saved end-shift reports
   const [showClosedReportsModal, setShowClosedReportsModal] = useState(false);
   const [closedShiftsList, setClosedShiftsList] = useState<any[]>([]);
   const [closedShiftsLoading, setClosedShiftsLoading] = useState(false);
+  // PPIC home: date and shift selection (different homepage from PC production)
+  const [ppicSelectedDate, setPpicSelectedDate] = useState(() => formatDateLocal(new Date()));
+  const [ppicSelectedShiftId, setPpicSelectedShiftId] = useState<number | null>(null); // null = All
+  const [ppicShifts, setPpicShifts] = useState<Shift[]>([]);
+  // PPIC home: live active shifts
+  const [ppicActiveShifts, setPpicActiveShifts] = useState<any[]>([]);
+  const [ppicActiveShiftsLoading, setPpicActiveShiftsLoading] = useState(false);
+  // Track whether the currently viewed closed/active shift is still live
+  const [viewingActiveShift, setViewingActiveShift] = useState(false);
 
   // Saved by-products on start shift page (editable after save)
   const [savedByProductsOnStartPage, setSavedByProductsOnStartPage] = useState<any[]>([]);
   const [savedByProductsMeta, setSavedByProductsMeta] = useState<{ shift: string; operator: string; date: string; totalOutputs: number; totalWeight: string; remark?: string; byStation?: { crusher: { outputs: number; weight: string }; washing: { outputs: number; weight: string }; extrusion: { outputs: number; weight: string } } } | null>(null);
   const [endShiftRemark, setEndShiftRemark] = useState('');
+
+  // Auto-close shift tracking
+  const [autoCloseWarningShown, setAutoCloseWarningShown] = useState(false);
 
   // Printer & Preview State
   const [selectedPrinter, setSelectedPrinter] = useState<any>(null);
@@ -209,6 +231,92 @@ const DashboardScreen = ({ navigation }: any) => {
     }, [selectedShift])
   );
 
+  // PPIC: load shift types for date/shift selector on home
+  useEffect(() => {
+    if (user?.role?.toLowerCase() !== 'ppic') return;
+    (async () => {
+      try {
+        const res = await masterDataApi.getShifts();
+        if (res.data?.success && Array.isArray(res.data.data)) setPpicShifts(res.data.data);
+      } catch (e) {
+        setPpicShifts([]);
+      }
+    })();
+  }, [user?.role]);
+
+  // PPIC: load currently running (active) shifts on focus
+  const loadPpicActiveShifts = async () => {
+    if (user?.role?.toLowerCase() !== 'ppic') return;
+    setPpicActiveShiftsLoading(true);
+    try {
+      const res = await productionApi.getAllActiveShifts();
+      if (res.data?.success && Array.isArray(res.data.data)) {
+        setPpicActiveShifts(res.data.data);
+      } else {
+        setPpicActiveShifts([]);
+      }
+    } catch (e) {
+      setPpicActiveShifts([]);
+    } finally {
+      setPpicActiveShiftsLoading(false);
+    }
+  };
+
+  useFocusEffect(useCallback(() => { loadPpicActiveShifts(); }, [user?.role]));
+
+  /** Open any shift (active or closed) into the shift-detail view */
+  const handleSelectAnyShift = async (shiftId: number, isActive: boolean) => {
+    try {
+      const res = await productionApi.getShiftSummary(shiftId);
+      if (!res.data?.success || !res.data.data) return;
+      const d = res.data.data;
+      setClosedShiftId(shiftId);
+      setViewingActiveShift(isActive);
+      setClosedShiftMeta({
+        shift: d.shift,
+        operator: d.operator,
+        date: d.date,
+        totalOutputs: d.totalOutputs ?? 0,
+        totalWeight: d.totalWeight ?? '0.0',
+        byStation: d.byStation ?? undefined,
+        remark: d.remark,
+      });
+      setClosedShiftRemarkEdit(d.remark ?? '');
+      const saved = (d.byProducts || []).map((p: any) => ({
+        name: p.name,
+        stationName: p.stationName ?? '',
+        category: p.category ?? '',
+        weight: p.weight,
+        stationId: p.stationId,
+        processLabel: getProcessLabel(p.stationName ?? ''),
+      }));
+      const fullTemplate = getFullWasteTemplate();
+      const merged = fullTemplate.length > 0 ? mergeSavedByProductsIntoFullTemplate(fullTemplate, saved) : saved;
+      setClosedShiftByProducts(merged);
+      setShowClosedReportsModal(false);
+      setShowShiftClosedView(true);
+      setShiftLogsSearch('');
+      setShiftLogsPageCrusher(1);
+      setShiftLogsPageWashing(1);
+      setShiftLogsPageExtrusion(1);
+      setClosedShiftLogsLoading(true);
+      try {
+        const logsRes = await productionApi.getShiftLogs(shiftId);
+        if (logsRes.data?.success && Array.isArray(logsRes.data.data)) {
+          setClosedShiftLogs(logsRes.data.data);
+        } else {
+          setClosedShiftLogs([]);
+        }
+      } catch (_e) {
+        setClosedShiftLogs([]);
+      } finally {
+        setClosedShiftLogsLoading(false);
+      }
+    } catch (e) {
+      Alert.alert(t('common.error'), t('messages.failedToLoadShiftSummary'));
+    }
+  };
+
   const loadShiftState = async () => {
     if (!selectedShift) return;
     try {
@@ -233,78 +341,94 @@ const DashboardScreen = ({ navigation }: any) => {
     }
   };
 
-  // Calculate shift end time based on shift type and actual start time
-  const calculateShiftEndTime = (shiftStartTimestamp: number, shiftType: Shift | null): number | null => {
-    if (!shiftType || !shiftType.start_time || !shiftType.end_time) return null;
-    
+  /**
+   * Given the actual shift start timestamp and the shift type, return two timestamps:
+   *   - scheduledEnd : the clock time when the shift type ends (today or next day for overnight)
+   *   - graceEnd     : scheduledEnd + 15 minutes (when the shift is force-closed)
+   *
+   * We anchor to the scheduled clock time (e.g. 16:00) rather than start+duration so
+   * that a late start does not push the auto-close past the scheduled end time.
+   */
+  const getShiftAutoCloseTimes = (
+    shiftStartTimestamp: number,
+    shiftType: Shift | null,
+  ): { scheduledEnd: number; graceEnd: number } | null => {
+    if (!shiftType?.end_time) return null;
     try {
-      // Parse shift type times (e.g., "08:00", "16:00")
-      const parseTime = (timeStr: string): number => {
-        const [hours, minutes] = timeStr.split(':').map(Number);
-        return hours * 60 + minutes; // minutes since midnight
-      };
-      
-      const shiftTypeStartMinutes = parseTime(shiftType.start_time);
-      const shiftTypeEndMinutes = parseTime(shiftType.end_time);
-      const shiftDurationMinutes = shiftTypeEndMinutes - shiftTypeStartMinutes;
-      
-      // If end time is before start time (e.g., night shift), add 24 hours
-      const actualDuration = shiftDurationMinutes < 0 ? shiftDurationMinutes + 24 * 60 : shiftDurationMinutes;
-      
-      // Calculate end time: shift start + duration + 15 minutes grace period
-      const gracePeriodMinutes = 15;
-      const shiftEndTimestamp = shiftStartTimestamp + (actualDuration * 60 * 1000) + (gracePeriodMinutes * 60 * 1000);
-      
-      return shiftEndTimestamp;
-    } catch (error) {
-      console.error('Error calculating shift end time:', error);
+      const [endH, endM] = shiftType.end_time.split(':').map(Number);
+      const base = new Date(shiftStartTimestamp);
+      base.setHours(endH ?? 0, endM ?? 0, 0, 0);
+      let scheduledEnd = base.getTime();
+      // Overnight shift: end_time is earlier than start_time, so add one day
+      if (scheduledEnd <= shiftStartTimestamp) {
+        scheduledEnd += 24 * 60 * 60 * 1000;
+      }
+      return { scheduledEnd, graceEnd: scheduledEnd + 15 * 60 * 1000 };
+    } catch {
       return null;
     }
   };
 
-  // Auto-close shift when time expires
+  // Auto-close shift: warn at scheduled end time, force-close 15 min after
   useEffect(() => {
     if (!isShiftActive || !backendShiftId || !selectedShift || !shiftStartTime) return;
-    
-    const checkAndAutoCloseShift = async () => {
-      const shiftEndTime = calculateShiftEndTime(shiftStartTime, selectedShift);
-      if (!shiftEndTime) return;
-      
+
+    let closing = false; // guard against double-close
+
+    const tick = async () => {
+      const times = getShiftAutoCloseTimes(shiftStartTime, selectedShift);
+      if (!times) return;
+
       const now = Date.now();
-      if (now >= shiftEndTime) {
-        // Shift has ended (including grace period), auto-close it
+
+      // ── Grace period expired → auto-close ──────────────────────────────────
+      if (now >= times.graceEnd) {
+        if (closing) return;
+        closing = true;
         try {
-          console.log('Auto-closing shift due to time expiration');
           const response = await productionApi.endShift(backendShiftId);
           if (response.data.success) {
             Alert.alert(
               'Shift Auto-Closed',
-              `Your ${selectedShift.name} shift has automatically ended after the 15-minute grace period.`,
-              [{ text: 'OK', onPress: () => {
-                setIsShiftActive(false);
-                setBackendShiftId(null);
-                setShiftLogs([]);
-                setShiftStartTime(null);
-                setSelectedStation(null);
-                setSelectedSection(null);
-                setSelectedSubLine(null);
-              }}]
+              `Your ${selectedShift.name} shift has been automatically closed.\n\nThe shift ended at ${selectedShift.end_time} and the 15-minute grace period has elapsed.`,
+              [{
+                text: 'OK',
+                onPress: () => {
+                  setIsShiftActive(false);
+                  setBackendShiftId(null);
+                  setShiftLogs([]);
+                  setShiftStartTime(null);
+                  setSelectedStation(null);
+                  setSelectedSection(null);
+                  setSelectedSubLine(null);
+                  setAutoCloseWarningShown(false);
+                },
+              }],
             );
           }
-        } catch (error) {
-          console.error('Error auto-closing shift:', error);
+        } catch (err) {
+          console.error('Error auto-closing shift:', err);
+          closing = false;
         }
+        return;
+      }
+
+      // ── Scheduled end time reached → show one-time warning ─────────────────
+      if (now >= times.scheduledEnd && !autoCloseWarningShown) {
+        setAutoCloseWarningShown(true);
+        Alert.alert(
+          'Shift Ended',
+          `Your ${selectedShift.name} shift has reached its scheduled end time (${selectedShift.end_time}).\n\nThe shift will be automatically closed in 15 minutes if not closed manually.`,
+          [{ text: 'OK' }],
+        );
       }
     };
-    
-    // Check immediately
-    checkAndAutoCloseShift();
-    
-    // Then check every minute
-    const interval = setInterval(checkAndAutoCloseShift, 60 * 1000);
-    
+
+    tick(); // check immediately on mount / state change
+    const interval = setInterval(tick, 30 * 1000); // check every 30 seconds
     return () => clearInterval(interval);
-  }, [isShiftActive, backendShiftId, selectedShift, shiftStartTime]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isShiftActive, backendShiftId, selectedShift, shiftStartTime, autoCloseWarningShown]);
 
   const loadStations = async () => {
     try {
@@ -338,6 +462,16 @@ const DashboardScreen = ({ navigation }: any) => {
     return () => clearInterval(interval);
   }, [isShiftActive, shiftStartTime]);
 
+  const showToast = useCallback((message: string) => {
+    setToastMessage(message);
+  }, []);
+
+  useEffect(() => {
+    if (!toastMessage) return;
+    const tid = setTimeout(() => setToastMessage(null), 4000);
+    return () => clearTimeout(tid);
+  }, [toastMessage]);
+
   const handleStartShift = async () => {
     if (!selectedShift) return;
     try {
@@ -354,9 +488,11 @@ const DashboardScreen = ({ navigation }: any) => {
         setBackendShiftId(response.data.data.id);
         setIsShiftActive(true);
         setShiftStartTime(Date.now());
+        setAutoCloseWarningShown(false);
       }
-    } catch (error) {
-      Alert.alert(t('common.error'), t('messages.failedToStartShift'));
+    } catch (error: any) {
+      const message = error.response?.data?.message || t('messages.failedToStartShift');
+      showToast(message);
     } finally {
       setIsLoading(false);
     }
@@ -368,21 +504,61 @@ const DashboardScreen = ({ navigation }: any) => {
     setShowEndShiftSummary(true);
   };
 
-  const initByProducts = () => {
-    const stationByProducts: any = {
-      'Label Removal': [{ name: 'PP Cords', category: 'Sellable', weight: 0 }, { name: 'Dust', category: 'Landfill', weight: 0 }, { name: 'Floor Sweep', category: 'Landfill', weight: 0 }],
-      'Crusher': [{ name: 'Spillage', category: 'Reprocess', weight: 0 }, { name: 'Off-spec Flakes', category: 'Reprocess', weight: 0 }],
-      'Washing': [{ name: 'Wet Fines', category: 'Dewater & Landfill', weight: 0 }],
-      'Extrusion': [{ name: 'Looms', category: 'HIGH VALUE - Regrind', weight: 0 }, { name: 'Filtered Material', category: 'Reprocess', weight: 0 }],
-      'Final Packaging': [{ name: 'Damaged Bags', category: 'Repack', weight: 0 }, { name: 'Spillage', category: 'Reprocess', weight: 0 }]
-    };
-    const initialByProducts: any[] = [];
-    stations.forEach(s => {
-      (stationByProducts[s.name] || []).forEach((p: any) => {
-        initialByProducts.push({ ...p, stationId: s.id, stationName: s.name });
+  const getProcessLabel = useCallback((stationName: string): string => {
+    const n = (stationName || '').toLowerCase();
+    if (n.includes('label removal') || n.includes('crusher')) return 'removeLabelCrushing';
+    if (n.includes('washing')) return 'washing';
+    if (n.includes('extrusion')) return 'extrusion';
+    return 'other';
+  }, []);
+
+  const getProcessTitle = useCallback((key: string) => {
+    switch (key) {
+      case 'removeLabelCrushing': return t('dashboard.processRemoveLabelCrushing');
+      case 'washing': return t('dashboard.processWashing');
+      case 'extrusion': return t('dashboard.processExtrusion');
+      default: return key;
+    }
+  }, [t]);
+
+  // Full list of all waste labels (all processes) with 0 weight - for showing "all labels" in closed/saved view
+  const getFullWasteTemplate = useCallback((): any[] => {
+    const labelRemovalStation = stations.find(s => s.name?.toLowerCase().includes('label removal') || (s as any).code === 'LR');
+    const crusherStation = stations.find(s => s.name?.toLowerCase().includes('crusher') || (s as any).code === 'CRS');
+    const washingStation = stations.find(s => s.name?.toLowerCase().includes('washing') || (s as any).code === 'WSH');
+    const extrusionStation = stations.find(s => s.name?.toLowerCase().includes('extrusion') || s.id === 4 || (s as any).code === 'EXT');
+    const stationForRemoveLabelCrushing = labelRemovalStation || crusherStation;
+    const list: any[] = [];
+    if (stationForRemoveLabelCrushing) {
+      ['Dust Remove Label', 'Sweep Floor'].forEach(name => {
+        list.push({ name, category: 'Waste', weight: 0, stationId: stationForRemoveLabelCrushing.id, stationName: stationForRemoveLabelCrushing.name, processLabel: 'removeLabelCrushing' });
       });
+    }
+    if (washingStation) {
+      ['Dust wet'].forEach(name => {
+        list.push({ name, category: 'Waste', weight: 0, stationId: washingStation.id, stationName: washingStation.name, processLabel: 'washing' });
+      });
+    }
+    if (extrusionStation) {
+      ['Lumps', 'Sweep Floor'].forEach(name => {
+        list.push({ name, category: 'Waste', weight: 0, stationId: extrusionStation.id, stationName: extrusionStation.name, processLabel: 'extrusion' });
+      });
+    }
+    return list;
+  }, [stations]);
+
+  const mergeSavedByProductsIntoFullTemplate = useCallback((fullTemplate: any[], savedList: any[]): any[] => {
+    return fullTemplate.map(t => {
+      const matchStation = (s: any) =>
+        s.stationId === t.stationId ||
+        (s.stationName && t.stationName && String(s.stationName).trim() === String(t.stationName).trim());
+      const saved = savedList.find((s: any) => s.name === t.name && matchStation(s));
+      return saved ? { ...t, weight: saved.weight, category: saved.category ?? t.category } : t;
     });
-    setByProductsInputs(initialByProducts);
+  }, []);
+
+  const initByProducts = () => {
+    setByProductsInputs(getFullWasteTemplate());
   };
 
   const handleCloseShift = async () => {
@@ -431,14 +607,13 @@ const DashboardScreen = ({ navigation }: any) => {
         byProducts: byProductsForPdf,
         remark: endShiftRemark.trim() || undefined,
       });
-      if (toSave.length > 0) {
-        await productionApi.logByProducts(backendShiftId, toSave.map(p => ({
-          stationId: p.stationId,
-          name: p.name,
-          weight: typeof p.weight === 'number' ? p.weight : Number(p.weight) || 0,
-          category: p.category ?? '',
-        })));
-      }
+      // Use PUT (delete + reinsert) so retrying shift close never creates duplicate by-product rows
+      await productionApi.updateByProducts(backendShiftId, toSave.map(p => ({
+        stationId: p.stationId,
+        name: p.name,
+        weight: typeof p.weight === 'number' ? p.weight : Number(p.weight) || 0,
+        category: p.category ?? '',
+      })));
       const response = await productionApi.endShift(backendShiftId, endShiftRemark.trim() || undefined);
       if (response.data.success) {
         const savedShiftId = backendShiftId;
@@ -451,18 +626,21 @@ const DashboardScreen = ({ navigation }: any) => {
           byStation,
           remark: endShiftRemark.trim() || undefined,
         };
-        const savedByProducts = byProductsForPdf.map((p, i) => ({ ...p, stationId: toSave[i].stationId }));
-        
-        // Store for start shift page display
+        const savedByProducts = byProductsForPdf.map((p, i) => ({ ...p, stationId: toSave[i].stationId, processLabel: toSave[i].processLabel }));
+        const fullTemplate = getFullWasteTemplate();
+        const mergedForStartPage = fullTemplate.length > 0 ? mergeSavedByProductsIntoFullTemplate(fullTemplate, savedByProducts) : savedByProducts;
+
+        // Store for start shift page display (all labels so user can edit/add)
         setClosedShiftId(savedShiftId);
         setSavedByProductsMeta(savedMeta);
-        setSavedByProductsOnStartPage(savedByProducts);
+        setSavedByProductsOnStartPage(mergedForStartPage);
         
         setShowEndShiftSummary(false);
         setEndShiftRemark('');
         setIsShiftActive(false);
         setBackendShiftId(null);
         setShiftLogs([]);
+        setAutoCloseWarningShown(false);
         // Don't show shift closed view, redirect to start shift page instead
       }
     } catch (error) {
@@ -478,20 +656,24 @@ const DashboardScreen = ({ navigation }: any) => {
     try {
       const res = await productionApi.getByProducts(closedShiftId);
       if (res.data?.success && Array.isArray(res.data.data)) {
-        setClosedShiftByProducts(res.data.data.map((r: any) => ({
+        const saved = res.data.data.map((r: any) => ({
           name: r.name,
           stationName: r.stationName ?? '',
           category: r.category ?? '',
           weight: r.weight,
           stationId: r.stationId,
-        })));
+          processLabel: getProcessLabel(r.stationName ?? ''),
+        }));
+        const fullTemplate = getFullWasteTemplate();
+        const merged = fullTemplate.length > 0 ? mergeSavedByProductsIntoFullTemplate(fullTemplate, saved) : saved;
+        setClosedShiftByProducts(merged);
       }
     } catch (e) {
       console.warn('Fetch closed by-products failed', e);
     } finally {
       setClosedByProductsLoading(false);
     }
-  }, [closedShiftId]);
+  }, [closedShiftId, getFullWasteTemplate, mergeSavedByProductsIntoFullTemplate, getProcessLabel]);
 
   const handleGeneratePdfAgain = async () => {
     // Support both closed shift view and start page saved by-products
@@ -512,6 +694,7 @@ const DashboardScreen = ({ navigation }: any) => {
         stationName: p.stationName ?? '',
         category: p.category ?? '',
         weight: typeof p.weight === 'number' ? p.weight : Number(p.weight) || 0,
+        processLabel: p.processLabel || getProcessLabel(p.stationName ?? ''),
       })),
     });
   };
@@ -521,18 +704,25 @@ const DashboardScreen = ({ navigation }: any) => {
     setClosedShiftId(null);
     setClosedShiftByProducts([]);
     setClosedShiftMeta(null);
+    setClosedShiftRemarkEdit('');
+    setClosedShiftLogs([]);
     setEditingByProductIndex(null);
+    setViewingActiveShift(false);
     // Clear saved by-products on start page
     setSavedByProductsOnStartPage([]);
     setSavedByProductsMeta(null);
     navigation.navigate('ShiftSelection');
   };
 
-  const handleOpenClosedReports = async () => {
+  const handleOpenClosedReports = async (useDate?: string, useShiftId?: number | null) => {
     setShowClosedReportsModal(true);
     setClosedShiftsLoading(true);
     try {
-      const res = await productionApi.getClosedShifts(30);
+      const limit = 100;
+      const date = user?.role?.toLowerCase() === 'ppic' ? (useDate ?? ppicSelectedDate) : undefined;
+      const shiftTypeIdRaw = user?.role?.toLowerCase() === 'ppic' ? (useShiftId ?? ppicSelectedShiftId) : null;
+      const shiftTypeId = shiftTypeIdRaw != null && shiftTypeIdRaw >= 1 && shiftTypeIdRaw <= 3 ? Number(shiftTypeIdRaw) : undefined;
+      const res = await productionApi.getClosedShifts(limit, date, shiftTypeId);
       if (res.data?.success && Array.isArray(res.data.data)) {
         setClosedShiftsList(res.data.data);
       } else {
@@ -560,15 +750,37 @@ const DashboardScreen = ({ navigation }: any) => {
         byStation: d.byStation ?? undefined,
         remark: d.remark,
       });
-      setClosedShiftByProducts((d.byProducts || []).map((p: any) => ({
+      setClosedShiftRemarkEdit(d.remark ?? '');
+      const saved = (d.byProducts || []).map((p: any) => ({
         name: p.name,
         stationName: p.stationName ?? '',
         category: p.category ?? '',
         weight: p.weight,
         stationId: p.stationId,
-      })));
+        processLabel: getProcessLabel(p.stationName ?? ''),
+      }));
+      const fullTemplate = getFullWasteTemplate();
+      const merged = fullTemplate.length > 0 ? mergeSavedByProductsIntoFullTemplate(fullTemplate, saved) : saved;
+      setClosedShiftByProducts(merged);
       setShowClosedReportsModal(false);
       setShowShiftClosedView(true);
+      setShiftLogsSearch('');
+      setShiftLogsPageCrusher(1);
+      setShiftLogsPageWashing(1);
+      setShiftLogsPageExtrusion(1);
+      setClosedShiftLogsLoading(true);
+      try {
+        const logsRes = await productionApi.getShiftLogs(shiftId);
+        if (logsRes.data?.success && Array.isArray(logsRes.data.data)) {
+          setClosedShiftLogs(logsRes.data.data);
+        } else {
+          setClosedShiftLogs([]);
+        }
+      } catch (_e) {
+        setClosedShiftLogs([]);
+      } finally {
+        setClosedShiftLogsLoading(false);
+      }
     } catch (e) {
       Alert.alert(t('common.error'), t('messages.failedToLoadShiftSummary'));
     }
@@ -618,6 +830,16 @@ const DashboardScreen = ({ navigation }: any) => {
     }
   };
 
+  const saveClosedShiftRemark = async () => {
+    if (closedShiftId == null) return;
+    try {
+      await productionApi.updateClosedShiftRemark(closedShiftId, closedShiftRemarkEdit);
+      setClosedShiftMeta(prev => prev ? { ...prev, remark: closedShiftRemarkEdit } : null);
+    } catch (e) {
+      Alert.alert(t('common.error'), t('messages.failedToSaveByProduct'));
+    }
+  };
+
   const openEditLogWeight = (log: any) => {
     setEditingLogWeight(log);
     setEditWeightValue(String(log.weight || ''));
@@ -634,7 +856,16 @@ const DashboardScreen = ({ navigation }: any) => {
     setIsLoading(true);
     try {
       await productionApi.updateLogWeight(editingLogWeight.id, w);
-      
+      if (showShiftClosedView && closedShiftId) {
+        setClosedShiftLogs(prev => prev.map(log => log.id === editingLogWeight.id ? { ...log, weight: w } : log));
+        const sumRes = await productionApi.getClosedShiftSummary(closedShiftId);
+        if (sumRes.data?.success && sumRes.data.data) {
+          const d = sumRes.data.data;
+          setClosedShiftMeta(prev => prev ? { ...prev, totalOutputs: d.totalOutputs ?? 0, totalWeight: d.totalWeight ?? '0.0', byStation: d.byStation ?? prev.byStation } : null);
+        }
+        setEditingLogWeight(null);
+        setEditWeightValue('');
+      } else {
       // Update the log in the appropriate list
       if (selectedStation?.name === 'Crusher') {
         setCrusherLogs(prev => prev.map(log => 
@@ -658,6 +889,7 @@ const DashboardScreen = ({ navigation }: any) => {
       Alert.alert(t('common.success'), t('messages.weightUpdatedSuccessfully'));
       setEditingLogWeight(null);
       setEditWeightValue('');
+      }
     } catch (error: any) {
       Alert.alert(t('common.error'), error.response?.data?.message || t('messages.failedToUpdateWeight'));
     } finally {
@@ -676,11 +908,12 @@ const DashboardScreen = ({ navigation }: any) => {
       
       const response = await productionApi.getCrusherLogs(
         lineFilter,
-        selectedDate, 
+        selectedDate,
         searchQuery || undefined,
         statusFilter,
-        currentPage, 
-        10
+        currentPage,
+        10,
+        backendShiftId   // scope to current shift — prevents mixing logs from other shifts of the same day
       );
       if (response.data.success) {
         setCrusherLogs(response.data.data);
@@ -705,11 +938,12 @@ const DashboardScreen = ({ navigation }: any) => {
       
       const response = await productionApi.getWashingLogs(
         lineFilter,
-        washingSelectedDate, 
+        washingSelectedDate,
         washingSearchQuery || undefined,
         statusFilter,
-        washingCurrentPage, 
-        10
+        washingCurrentPage,
+        10,
+        backendShiftId   // scope to current shift
       );
       if (response.data.success) {
         setWashingLogs(response.data.data);
@@ -734,11 +968,12 @@ const DashboardScreen = ({ navigation }: any) => {
       
       const response = await productionApi.getExtrusionLogs(
         lineFilter,
-        extrusionSelectedDate, 
+        extrusionSelectedDate,
         extrusionSearchQuery || undefined,
         statusFilter,
-        extrusionCurrentPage, 
-        10
+        extrusionCurrentPage,
+        10,
+        backendShiftId   // scope to current shift
       );
       if (response.data.success) {
         setExtrusionLogs(response.data.data);
@@ -897,6 +1132,31 @@ const DashboardScreen = ({ navigation }: any) => {
       let statusFilter: string | undefined;
       let expectedStationName: string = '';
 
+      // Betty crusher input: search for 3E/Rapid crusher bags
+      const isBettyCrusherInput =
+        selectedSection === 'input' &&
+        selectedStation?.name?.toLowerCase().includes('crusher') &&
+        selectedSubLine === 'Betty';
+
+      if (isBettyCrusherInput) {
+        const response = await productionApi.searchLogs(
+          qrCode,
+          selectedStation!.id,
+          selectedStation!.id,
+          'pending',
+          ['3E', 'Rapid'],
+        );
+        if (response.data.success && response.data.data.length > 0) {
+          const matchedBatch = response.data.data[0];
+          setSelectedInputBag({ output_bag_qr: matchedBatch.output_bag_qr, weight: matchedBatch.weight || weight });
+          setShowScanner(false);
+        } else {
+          Alert.alert('Invalid Batch', 'This QR is not a valid 3E or Rapid crusher bag with pending status.');
+          setScanned(false);
+        }
+        return;
+      }
+
       if (selectedSection === 'input' && (selectedStation?.id === 3 || selectedStation?.name?.toLowerCase().includes('washing'))) {
         // Washing input: Crusher batches (station_id = 2) with status pending only
         targetStationId = 2;
@@ -908,11 +1168,17 @@ const DashboardScreen = ({ navigation }: any) => {
         statusFilter = 'pending';
         expectedStationName = 'washing';
       } else if (selectedSection === 'input' && (selectedStation?.id === 5 || selectedStation?.name?.toLowerCase().includes('final') || selectedStation?.name?.toLowerCase().includes('packing'))) {
-        // Final Packaging input: Extrusion batches (station_id = 4) with status pending only – same flow as Crusher→Washing, Washing→Extrusion
-        const extStation = stations.find((s: Station) => s.name?.toLowerCase().includes('extrusion') || s.id === 4);
-        targetStationId = extStation?.id ?? 4;
+        // Final Packaging input: Extrusion batches for PC/PET flow, Washing batches for PE flow (no Extrusion station)
+        const extStation = stations.find((s: Station) => s.name?.toLowerCase().includes('extrusion') || (s as any).code === 'EXT');
+        const washStation = stations.find((s: Station) => s.name?.toLowerCase().includes('washing') || (s as any).code === 'WSH');
+        if (extStation) {
+          targetStationId = extStation.id;
+          expectedStationName = 'extrusion';
+        } else if (washStation) {
+          targetStationId = washStation.id;
+          expectedStationName = 'washing';
+        }
         statusFilter = 'pending';
-        expectedStationName = 'extrusion';
       }
 
       // If we have a target station, validate the QR code
@@ -951,21 +1217,27 @@ const DashboardScreen = ({ navigation }: any) => {
     try {
       setIsLoading(true);
       setIsCurrentLogSaved(false); // Reset save state
-      const response = await productionApi.getNextQr(selectedStation.id, backendShiftId, selectedSubLine || undefined);
+      const response = await productionApi.getNextQr(selectedStation.id, backendShiftId, selectedSubLine || undefined, selectedShift?.id);
       if (response.data.success) {
-        const qrCode = response.data.data.qrCode;
-        // Use stationName from backend response (e.g., "Crusher-3E", "Washing-W1")
-        // Backend returns formatted station name with washing line number matching QR code format
+        const qrCode = response.data.data?.qrCode;
+        if (!qrCode || String(qrCode).trim() === '') {
+          Alert.alert(t('common.error'), t('messages.failedToGenerateQR'));
+          return;
+        }
+        // Use stationName from backend response (e.g., "Crusher-3E", "Washing-W1", "Extrusion-E1")
         const stationDisplay = response.data.data.details?.stationName || selectedStation.name;
+        const lineDisplay = selectedSubLine || selectedStation.name;
         setPreviewData({
-          qrCode: qrCode,
+          qrCode: String(qrCode).trim(),
           weight: weightInput,
-          station: stationDisplay,
-          line: selectedSubLine || selectedStation.name,
+          station: stationDisplay || selectedStation.name,
+          line: lineDisplay,
           date: new Date().toLocaleDateString()
         });
         setPreviewBagStatus((selectedStation.id === 2 || selectedStation.id === 3 || selectedStation.id === 4) ? 'pending' : 'Completed');
         setShowPrintPreview(true);
+      } else {
+        Alert.alert(t('common.error'), response.data?.message || t('messages.failedToGenerateQR'));
       }
     } catch (error) {
       Alert.alert(t('common.error'), t('messages.failedToGenerateQR'));
@@ -983,16 +1255,20 @@ const DashboardScreen = ({ navigation }: any) => {
       // Send photos as comma-separated string (or first photo if only one)
       const photoUrl = capturedImages.length > 0 ? capturedImages.join(',') : null;
       
+      // Use the weight captured at QR generation time (previewData.weight),
+      // not the live input field which may already be cleared.
+      const savedWeight = parseFloat(previewData.weight ?? weightInput);
       const response = await productionApi.logProduction({
         shiftId: backendShiftId,
         stationId: selectedStation.id,
         inputBagQr: selectedInputBag?.output_bag_qr || null,
         outputBagQr: previewData.qrCode,
-        weight: parseFloat(weightInput),
+        weight: isNaN(savedWeight) ? 0 : savedWeight,
         status: status,
         subLine: selectedSubLine || undefined,
         photoUrl: photoUrl,
-        remark: remarkInput.trim() || undefined
+        remark: remarkInput.trim() || undefined,
+        shiftTypeId: selectedShift?.id
       });
       if (response.data.success) {
         const savedLog = response.data.data;
@@ -1047,10 +1323,20 @@ const DashboardScreen = ({ navigation }: any) => {
       handleBackToShifts();
       return;
     }
-    if ((selectedStation?.name === 'Crusher' || selectedStation?.name === 'Washing') && selectedSubLine) {
+    if (selectedStation?.name === 'Extrusion' && selectedSubLine) {
       if (selectedSection) {
+        // Back from input/output → go to the inline section picker (keep subLine)
         setSelectedSection(null);
+      } else {
+        // Back from inline section picker → go back to sub-line list
         setSelectedSubLine(null);
+      }
+    } else if ((selectedStation?.name === 'Crusher' || selectedStation?.name === 'Washing') && selectedSubLine) {
+      if (selectedSection) {
+        // Betty: pressing back from input/output goes back to Betty's section picker
+        // Other crusher lines don't have a section picker, so also clear subLine
+        setSelectedSection(null);
+        if (selectedSubLine !== 'Betty') setSelectedSubLine(null);
       } else {
         setSelectedSubLine(null);
       }
@@ -1072,7 +1358,14 @@ const DashboardScreen = ({ navigation }: any) => {
       }
       const printData = { ...previewData, qrImage: qrBase64 };
       const success = await printService.printQRLabel(printData);
-      if (success) { setShowPrintPreview(false); setSelectedStation(null); }
+      if (success) {
+        setShowPrintPreview(false);
+        setSelectedStation(null);
+        setSelectedSubLine(null);
+        setSelectedSection(null);
+        setIsCurrentLogSaved(false);
+        setPreviewData(null);
+      }
     } catch (error) {
       Alert.alert(t('common.error'), t('messages.printError'));
     } finally {
@@ -1133,6 +1426,36 @@ const DashboardScreen = ({ navigation }: any) => {
     try {
       let targetStationId: number | undefined;
       let statusFilter: string | undefined;
+
+      // Betty crusher: input comes from 3E/Rapid crusher outputs only
+      const isBettyCrusherInput =
+        selectedStation?.name?.toLowerCase().includes('crusher') &&
+        selectedSubLine === 'Betty' &&
+        selectedSection === 'input';
+
+      if (isBettyCrusherInput) {
+        if (!text || text.trim().length === 0) {
+          setSuggestedBags([]);
+          setShowSuggestions(false);
+          return;
+        }
+        const response = await productionApi.searchLogs(
+          text,
+          selectedStation!.id, // same Crusher station
+          selectedStation!.id,  // current station = Crusher (to exclude already-in-use bags)
+          'pending',
+          ['3E', 'Rapid'],      // only 3E and Rapid sub-lines
+        );
+        if (response.data.success) {
+          setSuggestedBags(response.data.data);
+          setShowSuggestions(response.data.data.length > 0);
+        } else {
+          setSuggestedBags([]);
+          setShowSuggestions(false);
+        }
+        return;
+      }
+
       if (selectedStation?.id === 3) {
         // For washing, only search if user has typed something
         if (!text || text.trim().length === 0) {
@@ -1178,7 +1501,7 @@ const DashboardScreen = ({ navigation }: any) => {
         }
         return;
       }
-      // Final Packaging: only extrusion list with status pending
+      // Final Packaging: Extrusion batches for PC/PET flow, Washing batches for PE flow (no Extrusion station)
       const isFinalPackaging = selectedStation?.id === 5 ||
         selectedStation?.name?.toLowerCase().includes('final') ||
         selectedStation?.name?.toLowerCase().includes('packing');
@@ -1188,8 +1511,9 @@ const DashboardScreen = ({ navigation }: any) => {
           setShowSuggestions(false);
           return;
         }
-        const extStation = stations.find((s: Station) => s.name?.toLowerCase().includes('extrusion') || s.id === 4);
-        targetStationId = extStation?.id ?? 4;
+        const extStation = stations.find((s: Station) => s.name?.toLowerCase().includes('extrusion') || (s as any).code === 'EXT');
+        const washStation = stations.find((s: Station) => s.name?.toLowerCase().includes('washing') || (s as any).code === 'WSH');
+        targetStationId = extStation ? extStation.id : (washStation?.id ?? 3);
         statusFilter = 'pending';
         const response = await productionApi.searchLogs(text, targetStationId, selectedStation?.id, statusFilter);
         if (response.data.success) {
@@ -1243,6 +1567,14 @@ const DashboardScreen = ({ navigation }: any) => {
 
   return (
     <SafeAreaView style={styles.container} edges={Platform.OS === 'web' ? [] : ['top', 'bottom']}>
+      {toastMessage ? (
+        <View style={styles.toast}>
+          <Text style={styles.toastText} numberOfLines={3}>{toastMessage}</Text>
+          <TouchableOpacity onPress={() => setToastMessage(null)} style={styles.toastClose} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+            <X color="#FFF" size={20} />
+          </TouchableOpacity>
+        </View>
+      ) : null}
       <View style={styles.header}>
         <View style={styles.headerLeft}>
           {!selectedStation && !showEndShiftSummary && !showShiftClosedView ? (
@@ -1261,7 +1593,7 @@ const DashboardScreen = ({ navigation }: any) => {
               <ArrowLeft color="#333" size={24} />
               <View style={{ marginLeft: 10 }}>
                 <Text style={styles.stationTitle}>
-                  {showShiftClosedView ? 'Shift closed' : showEndShiftSummary ? 'End Shift' : (selectedStation?.name === 'Washing' ? selectedStation?.name : (selectedSubLine ? `${selectedStation?.name} (${selectedSubLine})` : selectedStation?.name))}
+                  {showShiftClosedView ? (viewingActiveShift ? 'Active Shift' : 'Shift closed') : showEndShiftSummary ? 'End Shift' : (selectedStation?.name === 'Washing' ? selectedStation?.name : (selectedSubLine ? `${selectedStation?.name} (${selectedSubLine})` : selectedStation?.name))}
                 </Text>
                 {!showEndShiftSummary && !showShiftClosedView && <View style={styles.contextPills}><Text style={styles.smallPill}>{selectedShift?.name}</Text></View>}
               </View>
@@ -1297,48 +1629,217 @@ const DashboardScreen = ({ navigation }: any) => {
         scrollsToTop={true}>
         {showShiftClosedView ? (
           <View style={styles.summaryContainer}>
+            {/* LIVE banner — shown when PPIC is viewing an ongoing shift */}
+            {viewingActiveShift && (
+              <View style={styles.ppicLiveBanner}>
+                <View style={styles.ppicLiveDotBanner} />
+                <Text style={styles.ppicLiveBannerText}>
+                  Live data — this shift is still running. Refresh to see latest outputs.
+                </Text>
+                <TouchableOpacity onPress={() => closedShiftId && handleSelectAnyShift(closedShiftId, true)}>
+                  <Text style={{ fontSize: 12, fontWeight: '700', color: '#15803D' }}>Refresh</Text>
+                </TouchableOpacity>
+              </View>
+            )}
             <View style={styles.summaryStatsCard}>
-              <Text style={styles.cardTitle}>{t('dashboard.shiftClosedSuccessfully')}</Text>
-              {closedShiftMeta?.remark ? (
-                <View style={{ marginTop: 8, paddingVertical: 6, paddingHorizontal: 10, backgroundColor: '#f1f5f9', borderRadius: 8 }}>
-                  <Text style={{ fontSize: 11, color: '#64748b', marginBottom: 2 }}>{t('dashboard.remark')}</Text>
-                  <Text style={{ fontSize: 13, color: '#334155' }}>{closedShiftMeta.remark}</Text>
-                </View>
-              ) : null}
-              <Text style={[styles.sectionTitle, { marginTop: 12 }]}>{t('dashboard.savedByProducts')}</Text>
+              <Text style={styles.cardTitle}>
+                {viewingActiveShift ? 'Active Shift — Live Data' : t('dashboard.shiftClosedSuccessfully')}
+              </Text>
+              <View style={{ marginTop: 8 }}>
+                <Text style={{ fontSize: 11, color: '#64748b', marginBottom: 4 }}>{t('dashboard.remark')}</Text>
+                <TextInput
+                  style={[styles.input, { minHeight: 44, backgroundColor: '#f8fafc', borderRadius: 8 }]}
+                  placeholder={t('dashboard.remarkPlaceholder')}
+                  placeholderTextColor="#94a3b8"
+                  value={closedShiftRemarkEdit}
+                  onChangeText={setClosedShiftRemarkEdit}
+                  multiline
+                  numberOfLines={2}
+                />
+                <TouchableOpacity onPress={saveClosedShiftRemark} style={[styles.editByProductBtn, { alignSelf: 'flex-start', marginTop: 6 }]}>
+                  <Text style={{ fontSize: 14, fontWeight: '600', color: '#0ea5e9' }}>{t('common.save')} {t('dashboard.remark')}</Text>
+                </TouchableOpacity>
+              </View>
+              {/* ── Production Outputs: categorised + search + pagination ── */}
+              {closedShiftLogsLoading ? (
+                <View style={{ marginVertical: 12, alignItems: 'center' }}><ActivityIndicator color="#333" /></View>
+              ) : closedShiftLogs.length > 0 ? (() => {
+                // Classify each log into a category
+                const categorise = (log: any) => {
+                  const st = stations.find(s => s.id === log.station_id);
+                  const name = (st?.name ?? '').toLowerCase();
+                  const code = ((st as any)?.code ?? '').toUpperCase();
+                  if (code === 'CRS' || name.includes('crusher')) return 'crusher';
+                  if (code === 'WSH' || name.includes('washing')) return 'washing';
+                  if (code === 'EXT' || code === 'EXTR' || name.includes('extrusion')) return 'extrusion';
+                  return 'other';
+                };
+                const q = shiftLogsSearch.trim().toLowerCase();
+                const filtered = closedShiftLogs.filter((log: any) => {
+                  if (!q) return true;
+                  const qr = (log.output_bag_qr || log.outputBagQr || '').toLowerCase();
+                  const st = stations.find(s => s.id === log.station_id);
+                  const sn = (st?.name ?? '').toLowerCase();
+                  const sl = (log.sub_line ?? '').toLowerCase();
+                  return qr.includes(q) || sn.includes(q) || sl.includes(q);
+                });
+                const cats: { key: string; label: string; color: string; accent: string; page: number; setPage: (p: number) => void }[] = [
+                  { key: 'crusher',   label: 'Crusher',   color: '#FFF7ED', accent: '#EA580C', page: shiftLogsPageCrusher,   setPage: setShiftLogsPageCrusher },
+                  { key: 'washing',   label: 'Washing',   color: '#EFF6FF', accent: '#2563EB', page: shiftLogsPageWashing,   setPage: setShiftLogsPageWashing },
+                  { key: 'extrusion', label: 'Extrusion', color: '#F0FDF4', accent: '#16A34A', page: shiftLogsPageExtrusion, setPage: setShiftLogsPageExtrusion },
+                  { key: 'other',     label: 'Other',     color: '#F8FAFC', accent: '#64748B', page: 1,                      setPage: () => {} },
+                ];
+                return (
+                  <View style={{ marginTop: 16 }}>
+                    <Text style={[styles.sectionTitle, { marginBottom: 6 }]}>{t('dashboard.productionOutputs')}</Text>
+                    <Text style={{ fontSize: 12, color: '#64748b', marginBottom: 10 }}>{t('dashboard.editAnyDataHint')}</Text>
+                    {/* Search bar */}
+                    <View style={styles.shiftLogsSearchBar}>
+                      <Search size={16} color="#94a3b8" />
+                      <TextInput
+                        style={styles.shiftLogsSearchInput}
+                        placeholder="Search QR code, station, sub-line…"
+                        placeholderTextColor="#94a3b8"
+                        value={shiftLogsSearch}
+                        onChangeText={(t) => { setShiftLogsSearch(t); setShiftLogsPageCrusher(1); setShiftLogsPageWashing(1); setShiftLogsPageExtrusion(1); }}
+                        returnKeyType="search"
+                      />
+                      {shiftLogsSearch !== '' && (
+                        <TouchableOpacity onPress={() => setShiftLogsSearch('')}>
+                          <X size={16} color="#94a3b8" />
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                    <Text style={{ fontSize: 11, color: '#94a3b8', marginBottom: 12 }}>
+                      {filtered.length} of {closedShiftLogs.length} entries
+                    </Text>
+                    {cats.map(cat => {
+                      const rows = filtered.filter((l: any) => categorise(l) === cat.key);
+                      if (rows.length === 0) return null;
+                      const totalPages = Math.ceil(rows.length / SHIFT_LOGS_PAGE_SIZE);
+                      const page = Math.min(cat.page, totalPages);
+                      const pageRows = rows.slice((page - 1) * SHIFT_LOGS_PAGE_SIZE, page * SHIFT_LOGS_PAGE_SIZE);
+                      const catWeight = rows.reduce((s: number, l: any) => s + Number(l.weight || 0), 0).toFixed(1);
+                      return (
+                        <View key={cat.key} style={[styles.shiftLogCategory, { backgroundColor: cat.color, borderColor: cat.accent + '55' }]}>
+                          {/* Category header */}
+                          <View style={styles.shiftLogCategoryHeader}>
+                            <View style={[styles.shiftLogCatDot, { backgroundColor: cat.accent }]} />
+                            <Text style={[styles.shiftLogCatLabel, { color: cat.accent }]}>{cat.label}</Text>
+                            <View style={styles.shiftLogCatBadge}>
+                              <Text style={[styles.shiftLogCatBadgeText, { color: cat.accent }]}>{rows.length} bags</Text>
+                            </View>
+                            <Text style={[styles.shiftLogCatWeight, { color: cat.accent }]}>{catWeight} kg</Text>
+                          </View>
+                          {/* Rows */}
+                          {pageRows.map((log: any) => {
+                            const st = stations.find(s => s.id === log.station_id);
+                            const stationName = st?.name ?? String(log.station_id);
+                            const qr = log.output_bag_qr || log.outputBagQr || '—';
+                            const sl = log.sub_line ? ` · ${log.sub_line}` : '';
+                            const statusColor = log.status === 'Cancelled' ? '#ef4444' : log.status === 'pending' ? '#f59e0b' : '#22c55e';
+                            return (
+                              <View key={log.id} style={styles.shiftLogRow}>
+                                <View style={{ flex: 1, minWidth: 0 }}>
+                                  <Text style={styles.shiftLogQr} numberOfLines={1}>{qr}</Text>
+                                  <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap' }}>
+                                    <Text style={styles.shiftLogMeta}>{stationName}{sl}</Text>
+                                    <View style={[styles.shiftLogStatusDot, { backgroundColor: statusColor }]} />
+                                    <Text style={[styles.shiftLogMeta, { color: statusColor }]}>{log.status}</Text>
+                                  </View>
+                                </View>
+                                <Text style={styles.shiftLogWeight}>{Number(log.weight) || 0} kg</Text>
+                                {/* Print button */}
+                                <TouchableOpacity
+                                  onPress={() => { setSelectedLogForPrint(log); setShowListPrintPreview(true); }}
+                                  style={styles.shiftLogPrintBtn}
+                                >
+                                  <PrinterIcon color="#475569" size={14} />
+                                </TouchableOpacity>
+                                {/* Edit button */}
+                                <TouchableOpacity onPress={() => openEditLogWeight(log)} style={styles.shiftLogEditBtn}>
+                                  <Pencil color="#0ea5e9" size={14} />
+                                  <Text style={styles.shiftLogEditText}>Edit</Text>
+                                </TouchableOpacity>
+                              </View>
+                            );
+                          })}
+                          {/* Pagination */}
+                          {totalPages > 1 && (
+                            <View style={styles.shiftLogPager}>
+                              <TouchableOpacity
+                                style={[styles.shiftLogPagerBtn, page === 1 && styles.shiftLogPagerBtnDisabled]}
+                                onPress={() => cat.setPage(Math.max(1, page - 1))}
+                                disabled={page === 1}
+                              >
+                                <ChevronLeft size={16} color={page === 1 ? '#cbd5e1' : cat.accent} />
+                              </TouchableOpacity>
+                              <Text style={[styles.shiftLogPagerText, { color: cat.accent }]}>
+                                {page} / {totalPages}
+                              </Text>
+                              <TouchableOpacity
+                                style={[styles.shiftLogPagerBtn, page === totalPages && styles.shiftLogPagerBtnDisabled]}
+                                onPress={() => cat.setPage(Math.min(totalPages, page + 1))}
+                                disabled={page === totalPages}
+                              >
+                                <ChevronRight size={16} color={page === totalPages ? '#cbd5e1' : cat.accent} />
+                              </TouchableOpacity>
+                            </View>
+                          )}
+                        </View>
+                      );
+                    })}
+                  </View>
+                );
+              })() : null}
+              <Text style={[styles.sectionTitle, { marginTop: 16 }]}>{t('dashboard.wasteFromProcess')}</Text>
               <Text style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>{t('dashboard.tapEditToChangeAgain')}</Text>
               {closedByProductsLoading ? (
                 <View style={{ marginVertical: 24, alignItems: 'center' }}><ActivityIndicator color="#333" /></View>
               ) : closedShiftByProducts.length === 0 ? (
                 <Text style={{ fontSize: 14, color: '#666', marginVertical: 16 }}>{t('dashboard.noByProducts')}</Text>
               ) : (
-                closedShiftByProducts.map((item, index) => (
-                  <View key={index} style={[styles.byProductRow, { marginBottom: 8 }]}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.byProductName}>{item.name}</Text>
-                      <Text style={styles.byProductStation}>{item.stationName} — {item.category}</Text>
-                    </View>
-                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                      <Text style={[styles.byProductName, { marginRight: 12 }]}>{item.weight} kg</Text>
-                      <TouchableOpacity onPress={() => openEditByProduct(index)} style={styles.editByProductBtn} accessibilityLabel="Edit weight">
-                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                          <Pencil color="#0ea5e9" size={16} />
-                          <Text style={{ fontSize: 14, fontWeight: '600', color: '#0ea5e9', marginLeft: 4 }}>{t('common.edit')}</Text>
+                (() => {
+                  let lastProcess = '';
+                  return closedShiftByProducts.map((item, index) => {
+                    const pl = item.processLabel || getProcessLabel(item.stationName);
+                    const showHeader = pl !== lastProcess;
+                    if (showHeader) lastProcess = pl;
+                    return (
+                      <View key={index}>
+                        {showHeader ? <Text style={[styles.processSectionHeader, { marginTop: index > 0 ? 16 : 0 }]}>{getProcessTitle(pl)} :</Text> : null}
+                        <View style={[styles.byProductRow, { marginBottom: 8 }]}>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.byProductName}>{item.name}</Text>
+                            <Text style={styles.byProductStation}>{item.stationName} — {item.category}</Text>
+                          </View>
+                          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                            <Text style={[styles.byProductName, { marginRight: 12 }]}>{Number(item.weight) || 0} kg</Text>
+                            <TouchableOpacity onPress={() => openEditByProduct(index)} style={styles.editByProductBtn} accessibilityLabel="Edit weight">
+                              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                <Pencil color="#0ea5e9" size={16} />
+                                <Text style={{ fontSize: 14, fontWeight: '600', color: '#0ea5e9', marginLeft: 4 }}>{t('common.edit')}</Text>
+                              </View>
+                            </TouchableOpacity>
+                          </View>
                         </View>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                ))
+                      </View>
+                    );
+                  });
+                })()
               )}
             </View>
-            <View style={{ flexDirection: 'row', marginTop: 16, marginBottom: 24 }}>
-              <TouchableOpacity style={[styles.closeShiftBtn, { flex: 1, marginRight: 6 }]} onPress={handleGeneratePdfAgain}>
+            <View style={{ marginTop: 20, marginBottom: 24 }}>
+              {/* Print / PDF row */}
+              <TouchableOpacity style={[styles.closeShiftBtn, { marginBottom: 10, backgroundColor: '#16A34A' }]} onPress={handleGeneratePdfAgain}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
                   <FileText color="#FFF" size={20} />
-                  <Text style={[styles.closeShiftText, { marginLeft: 8 }]}>Generate PDF</Text>
+                  <Text style={[styles.closeShiftText, { marginLeft: 8 }]}>
+                    {viewingActiveShift ? 'Print Live Report (PDF)' : 'Generate PDF Report'}
+                  </Text>
                 </View>
               </TouchableOpacity>
-              <TouchableOpacity style={[styles.closeShiftBtn, { flex: 1, backgroundColor: '#0ea5e9', marginLeft: 6 }]} onPress={handleBackToShifts}>
+              <TouchableOpacity style={[styles.closeShiftBtn, { backgroundColor: '#0ea5e9' }]} onPress={handleBackToShifts}>
                 <Text style={styles.closeShiftText}>{t('dashboard.backToShifts')}</Text>
               </TouchableOpacity>
             </View>
@@ -1376,26 +1877,38 @@ const DashboardScreen = ({ navigation }: any) => {
                 })()}
               </View>
             </View>
-            <Text style={styles.sectionTitle}>{t('dashboard.byProductsOptional')}</Text>
-            {byProductsInputs.map((item, index) => (
-              <View key={index} style={styles.byProductRow}>
-                <View style={{ flex: 1 }}><Text style={styles.byProductName}>{item.name}</Text><Text style={styles.byProductStation}>{item.stationName} - {item.category}</Text></View>
-                <View style={styles.byProductInputWrapper}>
-                  <TextInput
-                    style={styles.byProductInput}
-                    keyboardType="decimal-pad"
-                    value={typeof item.weight === 'number' ? (item.weight === 0 ? '' : String(item.weight)) : String(item.weight ?? '')}
-                    onChangeText={(val) => {
-                      const next = byProductsInputs.map((p, i) =>
-                        i === index ? { ...p, weight: val } : p
-                      );
-                      setByProductsInputs(next);
-                    }}
-                  />
-                  <Text style={styles.unitLabel}>kg</Text>
-                </View>
-              </View>
-            ))}
+            <Text style={styles.sectionTitle}>{t('dashboard.wasteFromProcess')}</Text>
+            <Text style={[styles.sectionTitle, { fontSize: 11, color: '#64748b', marginTop: -8, marginBottom: 12 }]}>{t('dashboard.wasteOptional')}</Text>
+            {(() => {
+              let lastProcess = '';
+              return byProductsInputs.map((item, index) => {
+                const pl = item.processLabel || getProcessLabel(item.stationName);
+                const showHeader = pl !== lastProcess;
+                if (showHeader) lastProcess = pl;
+                return (
+                  <View key={index}>
+                    {showHeader ? <Text style={[styles.processSectionHeader, { marginTop: index > 0 ? 16 : 0 }]}>{getProcessTitle(pl)} :</Text> : null}
+                    <View style={styles.byProductRow}>
+                      <View style={{ flex: 1 }}><Text style={styles.byProductName}>{item.name}</Text></View>
+                      <View style={styles.byProductInputWrapper}>
+                        <TextInput
+                          style={styles.byProductInput}
+                          keyboardType="decimal-pad"
+                          value={typeof item.weight === 'number' ? (item.weight === 0 ? '' : String(item.weight)) : String(item.weight ?? '')}
+                          onChangeText={(val) => {
+                            const next = byProductsInputs.map((p, i) =>
+                              i === index ? { ...p, weight: val } : p
+                            );
+                            setByProductsInputs(next);
+                          }}
+                        />
+                        <Text style={styles.unitLabel}>kg</Text>
+                      </View>
+                    </View>
+                  </View>
+                );
+              });
+            })()}
             <View style={[styles.inputGroup, { marginTop: 12 }]}>
               <Text style={styles.label}>{t('dashboard.remark')}</Text>
               <TextInput
@@ -1413,48 +1926,142 @@ const DashboardScreen = ({ navigation }: any) => {
           </View>
         ) : !isShiftActive ? (
           <View style={styles.startShiftContainer}>
+            {user?.role?.toLowerCase() === 'ppic' ? (
+              <View style={styles.ppicHomeContainer}>
+
+                {/* ── Active / Ongoing Shifts ── */}
+                <View style={styles.ppicSectionHeader}>
+                  <View style={styles.ppicLiveDot} />
+                  <Text style={styles.ppicSectionTitle}>Active Shifts</Text>
+                  <TouchableOpacity onPress={loadPpicActiveShifts} style={{ marginLeft: 'auto' }}>
+                    <Text style={{ fontSize: 12, color: '#0ea5e9', fontWeight: '600' }}>Refresh</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {ppicActiveShiftsLoading ? (
+                  <View style={{ alignItems: 'center', paddingVertical: 14 }}>
+                    <ActivityIndicator size="small" color="#17a34a" />
+                    <Text style={{ fontSize: 12, color: '#666', marginTop: 6 }}>Loading active shifts…</Text>
+                  </View>
+                ) : ppicActiveShifts.length === 0 ? (
+                  <View style={styles.ppicEmptyActive}>
+                    <Text style={styles.ppicEmptyActiveText}>No shifts are currently running.</Text>
+                  </View>
+                ) : (
+                  ppicActiveShifts.map((s: any) => (
+                    <TouchableOpacity
+                      key={s.shiftId}
+                      style={styles.ppicActiveShiftCard}
+                      activeOpacity={0.8}
+                      onPress={() => handleSelectAnyShift(s.shiftId, true)}
+                    >
+                      <View style={{ flex: 1 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
+                          <View style={styles.ppicLivePill}>
+                            <View style={styles.ppicLiveDotSmall} />
+                            <Text style={styles.ppicLivePillText}>LIVE</Text>
+                          </View>
+                          <Text style={styles.ppicActiveShiftName} numberOfLines={1}>{s.shiftType}</Text>
+                        </View>
+                        <Text style={styles.ppicActiveShiftOperator}>Operator: {s.operatorName}</Text>
+                        <Text style={styles.ppicActiveShiftMeta}>
+                          {s.outputsSoFar} outputs · {s.weightSoFar} kg
+                        </Text>
+                      </View>
+                      <ChevronRight color="#17a34a" size={20} />
+                    </TouchableOpacity>
+                  ))
+                )}
+
+                {/* ── Closed Reports ── */}
+                <View style={[styles.ppicSectionHeader, { marginTop: 20 }]}>
+                  <FileText color="#0ea5e9" size={14} />
+                  <Text style={[styles.ppicSectionTitle, { marginLeft: 6, color: '#0ea5e9' }]}>Closed Reports</Text>
+                </View>
+
+                <Text style={styles.ppicHomeSubtitle}>{t('dashboard.ppicHomeSubtitle')}</Text>
+                <View style={styles.ppicHomeCard}>
+                  <Text style={styles.ppicHomeLabel}>{t('dashboard.ppicSelectDate')}</Text>
+                  <StationDatePicker
+                    value={parseDateLocal(ppicSelectedDate)}
+                    onChange={(date) => setPpicSelectedDate(formatDateLocal(date))}
+                    maximumDate={maxDate}
+                  />
+                </View>
+                <View style={styles.ppicHomeCard}>
+                  <Text style={styles.ppicHomeLabel}>{t('dashboard.ppicSelectShift')}</Text>
+                  <View style={styles.ppicShiftRow}>
+                    <TouchableOpacity
+                      style={[styles.ppicShiftBtn, ppicSelectedShiftId === null && styles.ppicShiftBtnActive]}
+                      onPress={() => setPpicSelectedShiftId(null)}
+                    >
+                      <Text style={[styles.ppicShiftBtnText, ppicSelectedShiftId === null && styles.ppicShiftBtnTextActive]}>{t('dashboard.all')}</Text>
+                    </TouchableOpacity>
+                    {ppicShifts.map((s) => (
+                      <TouchableOpacity
+                        key={s.id}
+                        style={[styles.ppicShiftBtn, ppicSelectedShiftId === s.id && styles.ppicShiftBtnActive]}
+                        onPress={() => setPpicSelectedShiftId(s.id)}
+                      >
+                        <Text style={[styles.ppicShiftBtnText, ppicSelectedShiftId === s.id && styles.ppicShiftBtnTextActive]}>{s.name}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+                <TouchableOpacity style={[styles.closeShiftBtn, { marginTop: 16, backgroundColor: '#0ea5e9' }]} onPress={() => handleOpenClosedReports(ppicSelectedDate, ppicSelectedShiftId)}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
+                    <FileText color="#FFF" size={20} />
+                    <Text style={[styles.closeShiftText, { marginLeft: 8 }]}>{t('dashboard.viewEditClosedReports')}</Text>
+                  </View>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <View style={{ width: '100%' }}>
             <TouchableOpacity style={styles.startShiftCard} onPress={handleStartShift}>
               <View style={styles.playIconCircle}><Play fill="#FFF" color="#FFF" size={24} /></View>
               <View style={styles.startShiftText}><Text style={styles.startShiftTitle}>{t('dashboard.startShift')}</Text><Text style={styles.startShiftSubtitle}>{t('dashboard.tapToBegin')}</Text></View>
               <ChevronRight color="#FFF" size={24} />
             </TouchableOpacity>
-
-            {user?.role?.toLowerCase() === 'ppic' && (
-              <TouchableOpacity style={[styles.closeShiftBtn, { marginTop: 16, backgroundColor: '#0ea5e9' }]} onPress={handleOpenClosedReports}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
-                  <FileText color="#FFF" size={20} />
-                  <Text style={[styles.closeShiftText, { marginLeft: 8 }]}>{t('dashboard.viewEditClosedReports')}</Text>
-                </View>
-              </TouchableOpacity>
-            )}
-            
             {savedByProductsOnStartPage.length > 0 && (
               <View style={styles.summaryStatsCard}>
-                <Text style={styles.cardTitle}>{t('dashboard.savedByProducts')}</Text>
+                <Text style={styles.cardTitle}>{t('dashboard.wasteFromProcess')}</Text>
                 <Text style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>{t('dashboard.tapEditToChange')}</Text>
-                {savedByProductsOnStartPage.map((item, index) => (
-                  <View key={index} style={[styles.byProductRow, { marginBottom: 8 }]}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.byProductName}>{item.name}</Text>
-                      <Text style={styles.byProductStation}>{item.stationName} — {item.category}</Text>
-                    </View>
-                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                      <Text style={[styles.byProductName, { marginRight: 12 }]}>{item.weight} kg</Text>
-                      <TouchableOpacity onPress={() => openEditByProduct(index)} style={styles.editByProductBtn} accessibilityLabel="Edit weight">
-                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                          <Pencil color="#0ea5e9" size={16} />
-                          <Text style={{ fontSize: 14, fontWeight: '600', color: '#0ea5e9', marginLeft: 4 }}>{t('common.edit')}</Text>
+                {(() => {
+                  let lastProcess = '';
+                  return savedByProductsOnStartPage.map((item, index) => {
+                    const pl = item.processLabel || getProcessLabel(item.stationName);
+                    const showHeader = pl !== lastProcess;
+                    if (showHeader) lastProcess = pl;
+                    return (
+                      <View key={index}>
+                        {showHeader ? <Text style={[styles.processSectionHeader, { marginTop: index > 0 ? 16 : 0 }]}>{getProcessTitle(pl)} :</Text> : null}
+                        <View style={[styles.byProductRow, { marginBottom: 8 }]}>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.byProductName}>{item.name}</Text>
+                            <Text style={styles.byProductStation}>{item.stationName} — {item.category}</Text>
+                          </View>
+                          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                            <Text style={[styles.byProductName, { marginRight: 12 }]}>{Number(item.weight) || 0} kg</Text>
+                            <TouchableOpacity onPress={() => openEditByProduct(index)} style={styles.editByProductBtn} accessibilityLabel="Edit weight">
+                              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                <Pencil color="#0ea5e9" size={16} />
+                                <Text style={{ fontSize: 14, fontWeight: '600', color: '#0ea5e9', marginLeft: 4 }}>{t('common.edit')}</Text>
+                              </View>
+                            </TouchableOpacity>
+                          </View>
                         </View>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                ))}
+                      </View>
+                    );
+                  });
+                })()}
                 <TouchableOpacity style={[styles.closeShiftBtn, { marginTop: 16 }]} onPress={handleGeneratePdfAgain}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
                     <FileText color="#FFF" size={20} />
                     <Text style={[styles.closeShiftText, { marginLeft: 8 }]}>{t('dashboard.generatePDF')}</Text>
                   </View>
                 </TouchableOpacity>
+              </View>
+            )}
               </View>
             )}
           </View>
@@ -1699,17 +2306,15 @@ const DashboardScreen = ({ navigation }: any) => {
                                     <Pencil color="#0ea5e9" size={18} />
                                   </TouchableOpacity>
                                 )}
-                                {log.status === 'pending' && (
-                                  <TouchableOpacity
-                                    style={styles.printIconButton}
-                                    onPress={() => {
-                                      setSelectedLogForPrint(log);
-                                      setShowListPrintPreview(true);
-                                    }}
-                                  >
-                                    <PrinterIcon color="#17a34a" size={20} />
-                                  </TouchableOpacity>
-                                )}
+                                <TouchableOpacity
+                                  style={styles.printIconButton}
+                                  onPress={() => {
+                                    setSelectedLogForPrint(log);
+                                    setShowListPrintPreview(true);
+                                  }}
+                                >
+                                  <PrinterIcon color="#17a34a" size={20} />
+                                </TouchableOpacity>
                                 <View style={[styles.logBadge, { 
                                   backgroundColor: log.sub_line === '3E' ? '#EBF5FF' : log.sub_line === 'Rapid' ? '#F5F3FF' : '#D1FAE5',
                                 }]}>
@@ -1750,15 +2355,224 @@ const DashboardScreen = ({ navigation }: any) => {
                       )}
                     </View>
                     </View>
+                  ) : selectedSubLine === 'Betty' ? (
+                  /* ── Betty Crusher: input from 3E / Rapid bags ──────────────── */
+                  <>
+                    <View style={styles.sublineBadgeWrapper}>
+                      <View style={[styles.sublineBadge, { backgroundColor: '#D1FAE5', borderColor: '#a7f3d0' }]}>
+                        <Text style={[styles.sublineBadgeText, { color: '#059669' }]}>Working on: Betty Line</Text>
+                      </View>
+                    </View>
+
+                    {/* Section picker — shown before choosing Input or Output */}
+                    {!selectedSection ? (
+                      <View style={styles.sectionOptions}>
+                        <TouchableOpacity
+                          style={styles.sectionOption}
+                          onPress={() => { setSelectedSection('input'); setSelectedInputBag(null); setBagSearchQuery(''); }}
+                        >
+                          <View style={[styles.optionIcon, { backgroundColor: '#3b82f6' }]}>
+                            <Plus color="#FFF" size={24} />
+                          </View>
+                          <View>
+                            <Text style={styles.optionTitle}>INPUT</Text>
+                            <Text style={styles.optionSubtitle}>Scan 3E / Rapid bag</Text>
+                          </View>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={styles.sectionOption}
+                          onPress={() => { setSelectedSection('output'); }}
+                        >
+                          <View style={[styles.optionIcon, { backgroundColor: '#22c55e' }]}>
+                            <Minus color="#FFF" size={24} />
+                          </View>
+                          <View>
+                            <Text style={styles.optionTitle}>OUTPUT</Text>
+                            <Text style={styles.optionSubtitle}>Generate Betty bag QR</Text>
+                          </View>
+                        </TouchableOpacity>
+                      </View>
+                    ) : selectedSection === 'input' ? (
+                      /* ── Betty INPUT: scan a 3E / Rapid crusher bag ── */
+                      <View style={styles.sectionCard}>
+                        <View style={styles.sectionHeaderRow}>
+                          <View style={[styles.typePill, { backgroundColor: '#E0F2FE' }]}>
+                            <Text style={[styles.typePillText, { color: '#0369A1' }]}>INPUT</Text>
+                          </View>
+                          <Text style={styles.sectionTitleText}>From 3E / Rapid Crusher</Text>
+                        </View>
+
+                        {/* Search */}
+                        <View style={styles.searchContainer}>
+                          <View style={styles.searchInputWrapper}>
+                            <Search size={20} color="#666" style={{ marginRight: 10 }} />
+                            <TextInput
+                              style={styles.searchTextInput}
+                              placeholder="Search QR code (3E / Rapid bag)…"
+                              value={bagSearchQuery}
+                              onChangeText={onBagSearch}
+                              onFocus={() => { if (suggestedBags.length > 0) setShowSuggestions(true); }}
+                            />
+                          </View>
+                          {showSuggestions && (
+                            <View style={styles.suggestionsList}>
+                              {suggestedBags.map((bag, i) => (
+                                <TouchableOpacity
+                                  key={i}
+                                  style={styles.suggestionItem}
+                                  onPress={() => { setSelectedInputBag(bag); setShowSuggestions(false); setBagSearchQuery(''); }}
+                                >
+                                  <Text style={styles.suggestionId}>{bag.output_bag_qr}</Text>
+                                  <Text style={styles.suggestionDetail}>{bag.sub_line} — {bag.weight} kg</Text>
+                                </TouchableOpacity>
+                              ))}
+                            </View>
+                          )}
+                        </View>
+
+                        {/* Scan */}
+                        <TouchableOpacity style={styles.scanButton} onPress={() => { setScanned(false); setShowScanner(true); }}>
+                          <CameraIcon color="#17a34a" size={20} />
+                          <Text style={styles.scanButtonText}>Scan QR Code</Text>
+                        </TouchableOpacity>
+
+                        {/* Selected bag preview */}
+                        {selectedInputBag && (
+                          <View style={styles.selectedBagCard}>
+                            <View style={{ flex: 1 }}>
+                              <Text style={styles.selectedBagId}>{selectedInputBag.output_bag_qr}</Text>
+                              <Text style={styles.selectedBagWeight}>{selectedInputBag.weight} kg</Text>
+                            </View>
+                            <TouchableOpacity onPress={() => setSelectedInputBag(null)}>
+                              <X color="#EB445A" size={20} />
+                            </TouchableOpacity>
+                          </View>
+                        )}
+
+                        {/* Confirm button */}
+                        <TouchableOpacity
+                          style={[styles.primaryButton, (!selectedInputBag || isLoading) && { opacity: 0.5 }]}
+                          disabled={!selectedInputBag || isLoading}
+                          onPress={async () => {
+                            if (!selectedInputBag) return;
+                            try {
+                              setIsLoading(true);
+                              const response = await productionApi.updateLogStatus(
+                                selectedInputBag.output_bag_qr,
+                                'Completed',
+                                undefined,
+                                undefined,
+                                'Betty', // usedLine
+                              );
+                              if (response.data.success) {
+                                Alert.alert('Success', 'Bag marked as received by Betty crusher.');
+                                setSelectedInputBag(null);
+                                setBagSearchQuery('');
+                                setSuggestedBags([]);
+                                setShowSuggestions(false);
+                                setSelectedSection(null);
+                              } else {
+                                Alert.alert('Error', 'Failed to update bag status.');
+                              }
+                            } catch (err) {
+                              Alert.alert('Error', 'Could not update bag status.');
+                            } finally {
+                              setIsLoading(false);
+                            }
+                          }}
+                        >
+                          <Text style={styles.primaryButtonText}>Confirm Input (Mark as Received)</Text>
+                        </TouchableOpacity>
+
+                        {/* Back */}
+                        <TouchableOpacity style={[styles.secondaryButton, { marginTop: 8 }]} onPress={() => { setSelectedSection(null); setSelectedInputBag(null); }}>
+                          <Text style={styles.secondaryButtonText}>← Back</Text>
+                        </TouchableOpacity>
+                      </View>
+                    ) : (
+                      /* ── Betty OUTPUT: same form as 3E / Rapid ── */
+                      <>
+                        <View style={styles.sectionCard}>
+                          <View style={styles.sectionHeaderRow}>
+                            <View style={[styles.typePill, { backgroundColor: '#DCFCE7' }]}>
+                              <Text style={[styles.typePillText, { color: '#15803D' }]}>OUTPUT</Text>
+                            </View>
+                            <Text style={styles.sectionTitleText}>Jumbo Bag (Betty)</Text>
+                          </View>
+
+                          <View style={styles.inputGroup}>
+                            <Text style={styles.label}>Weight (kg)</Text>
+                            <View style={styles.inputWithIcon}>
+                              <TextInput
+                                style={[styles.input, { flex: 1 }]}
+                                placeholder="Enter weight"
+                                placeholderTextColor="#999"
+                                keyboardType="numeric"
+                                value={weightInput}
+                                onChangeText={setWeightInput}
+                              />
+                              <TouchableOpacity style={styles.iconInsideInput}>
+                                <Scale size={20} color="#666" />
+                              </TouchableOpacity>
+                            </View>
+                          </View>
+
+                          <TouchableOpacity style={styles.secondaryButton} onPress={handleTakePhoto}>
+                            <CameraIcon size={20} color="#475569" />
+                            <Text style={styles.secondaryButtonText}>Take Photo</Text>
+                          </TouchableOpacity>
+
+                          {capturedImages.length > 0 && (
+                            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.photosPreviewContainer} contentContainerStyle={styles.photosPreviewContent}>
+                              {capturedImages.map((imageUri, index) => (
+                                <View key={index} style={styles.photoPreviewItem}>
+                                  <Image source={{ uri: imageUri }} style={styles.photoPreviewThumbnail} />
+                                  <TouchableOpacity style={styles.removePhotoButton} onPress={() => setCapturedImages(prev => prev.filter((_, i) => i !== index))}>
+                                    <X size={16} color="#FFF" />
+                                  </TouchableOpacity>
+                                </View>
+                              ))}
+                            </ScrollView>
+                          )}
+
+                          <TouchableOpacity
+                            style={[styles.primaryButton, (!weightInput || isLoading) && { opacity: 0.5, backgroundColor: '#E2E8F0' }]}
+                            onPress={handleLogProduction}
+                            disabled={!weightInput || isLoading}
+                          >
+                            {isLoading ? <ActivityIndicator color="#666" /> : <PrinterIcon size={20} color={!weightInput ? '#94A3B8' : '#FFF'} />}
+                            <Text style={[styles.primaryButtonText, !weightInput && { color: '#94A3B8' }]}>Generate QR & Print</Text>
+                          </TouchableOpacity>
+
+                          <TouchableOpacity style={[styles.secondaryButton, { marginTop: 8 }]} onPress={() => setSelectedSection(null)}>
+                            <Text style={styles.secondaryButtonText}>← Back</Text>
+                          </TouchableOpacity>
+                        </View>
+
+                        <View style={styles.progressCardRedesign}>
+                          <Text style={styles.progressTitleRedesign}>Shift Progress (Betty)</Text>
+                          <View style={styles.progressDataRow}>
+                            <Text style={styles.progressDataLabel}>Outputs this shift</Text>
+                            <Text style={styles.progressDataValue}>{currentViewBags} bags</Text>
+                          </View>
+                          <View style={styles.progressDataRow}>
+                            <Text style={styles.progressDataLabel}>Total weight</Text>
+                            <Text style={styles.progressDataValue}>{currentViewWeight.toFixed(1)} kg</Text>
+                          </View>
+                        </View>
+                      </>
+                    )}
+                  </>
                   ) : (
+                  /* ── 3E / Rapid: no input scanning, direct output ───────────── */
                   <>
                     <View style={styles.sublineBadgeWrapper}>
                       <View style={[styles.sublineBadge, { 
-                        backgroundColor: selectedSubLine === '3E' ? '#EBF5FF' : selectedSubLine === 'Rapid' ? '#F5F3FF' : '#D1FAE5',
-                        borderColor: selectedSubLine === '3E' ? '#bfdbfe' : selectedSubLine === 'Rapid' ? '#ddd6fe' : '#a7f3d0'
+                        backgroundColor: selectedSubLine === '3E' ? '#EBF5FF' : '#F5F3FF',
+                        borderColor: selectedSubLine === '3E' ? '#bfdbfe' : '#ddd6fe'
                       }]}>
                         <Text style={[styles.sublineBadgeText, { 
-                          color: selectedSubLine === '3E' ? '#2563eb' : selectedSubLine === 'Rapid' ? '#7c3aed' : '#059669'
+                          color: selectedSubLine === '3E' ? '#2563eb' : '#7c3aed'
                         }]}>Working on: {selectedSubLine} Line</Text>
                       </View>
                     </View>
@@ -2025,17 +2839,15 @@ const DashboardScreen = ({ navigation }: any) => {
                                   <Pencil color="#0ea5e9" size={18} />
                                 </TouchableOpacity>
                               )}
-                              {log.status === 'pending' && (
-                                <TouchableOpacity 
-                                  style={styles.printIconButton}
-                                  onPress={() => {
-                                    setSelectedLogForPrint(log);
-                                    setShowListPrintPreview(true);
-                                  }}
-                                >
-                                  <Printer size={18} color="#17a34a" />
-                                </TouchableOpacity>
-                              )}
+                              <TouchableOpacity 
+                                style={styles.printIconButton}
+                                onPress={() => {
+                                  setSelectedLogForPrint(log);
+                                  setShowListPrintPreview(true);
+                                }}
+                              >
+                                <Printer size={18} color="#17a34a" />
+                              </TouchableOpacity>
                               <View style={[
                                 styles.logBadge,
                                 log.sub_line === 'Washing 1' && { backgroundColor: '#06b6d4' },
@@ -2487,17 +3299,15 @@ const DashboardScreen = ({ navigation }: any) => {
                                   <Pencil color="#0ea5e9" size={18} />
                                 </TouchableOpacity>
                               )}
-                              {log.status === 'pending' && (
-                                <TouchableOpacity 
-                                  style={styles.printIconButton}
-                                  onPress={() => {
-                                    setSelectedLogForPrint(log);
-                                    setShowListPrintPreview(true);
-                                  }}
-                                >
-                                  <Printer size={18} color="#17a34a" />
-                                </TouchableOpacity>
-                              )}
+                              <TouchableOpacity 
+                                style={styles.printIconButton}
+                                onPress={() => {
+                                  setSelectedLogForPrint(log);
+                                  setShowListPrintPreview(true);
+                                }}
+                              >
+                                <Printer size={18} color="#17a34a" />
+                              </TouchableOpacity>
                               <View style={[
                                 styles.logBadge,
                                 log.sub_line === 'Extrusion 1' && { backgroundColor: '#f97316' },
@@ -2540,6 +3350,23 @@ const DashboardScreen = ({ navigation }: any) => {
                     )}
                     </View>
                   </React.Fragment>
+                ) : !selectedSection ? (
+                  /* Sub-line chosen but section not yet selected — show the picker inline */
+                  <View style={styles.sectionOptions}>
+                    <View style={styles.sublineBadgeWrapper}>
+                      <View style={[styles.sublineBadge, { backgroundColor: '#FEF3C7', borderColor: '#FCD34D' }]}>
+                        <Text style={[styles.sublineBadgeText, { color: '#D97706' }]}>Line: {selectedSubLine}</Text>
+                      </View>
+                    </View>
+                    <TouchableOpacity style={styles.sectionOption} onPress={() => setSelectedSection('input')}>
+                      <View style={[styles.optionIcon, { backgroundColor: '#f97316' }]}><Plus color="#FFF" size={24} /></View>
+                      <View><Text style={styles.optionTitle}>INPUT</Text><Text style={styles.optionSubtitle}>Scan washing bag</Text></View>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.sectionOption} onPress={() => setSelectedSection('output')}>
+                      <View style={[styles.optionIcon, { backgroundColor: '#17a34a' }]}><Box color="#FFF" size={24} /></View>
+                      <View><Text style={styles.optionTitle}>OUTPUT</Text><Text style={styles.optionSubtitle}>Generate bag QR</Text></View>
+                    </TouchableOpacity>
+                  </View>
                 ) : selectedSection === 'input' ? (
                   <React.Fragment>
                     <View style={styles.sublineBadgeWrapper}>
@@ -3037,20 +3864,28 @@ const DashboardScreen = ({ navigation }: any) => {
 
             {/* STEP 2: PRINT Button (Shown after saving) */}
             {isCurrentLogSaved && (
-            <TouchableOpacity 
-                style={[styles.primaryButton, { backgroundColor: '#17a34a', marginBottom: 0, height: 56 }]}
-              onPress={executePrint}
-              disabled={isPrinting}
-            >
-              {isPrinting ? (
-                  <ActivityIndicator color="#FFF" />
-              ) : (
-                <>
-                    <PrinterIcon color="#FFF" size={24} style={{ marginRight: 10 }} />
-                    <Text style={[styles.primaryButtonText, { fontSize: 18, fontWeight: '700' }]}>Print Label</Text>
-                </>
-              )}
-            </TouchableOpacity>
+              <>
+                <TouchableOpacity 
+                  style={[styles.primaryButton, { backgroundColor: '#17a34a', marginBottom: 8, height: 56 }]}
+                  onPress={executePrint}
+                  disabled={isPrinting}
+                >
+                  {isPrinting ? (
+                    <ActivityIndicator color="#FFF" />
+                  ) : (
+                    <>
+                      <PrinterIcon color="#FFF" size={24} style={{ marginRight: 10 }} />
+                      <Text style={[styles.primaryButtonText, { fontSize: 18, fontWeight: '700' }]}>Print Label</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+                {/* Printer-down hint: close preview and reprint from the logs list */}
+                <View style={{ backgroundColor: '#FEF3C7', borderRadius: 8, padding: 10, marginTop: 4, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <Text style={{ fontSize: 13, color: '#92400e', flex: 1 }}>
+                    Printer not responding? Close this preview — your QR is saved. Go to the station logs list and tap the 🖨️ icon to reprint any time.
+                  </Text>
+                </View>
+              </>
             )}
           </View>
         </View>
@@ -3084,11 +3919,14 @@ const DashboardScreen = ({ navigation }: any) => {
                 <View style={[styles.previewItem, { alignItems: 'flex-end' }]}>
                   <Text style={styles.previewLabel}>Station</Text>
                   <Text style={styles.previewValue}>
-                    {selectedLogForPrint?.sub_line 
-                      ? (selectedLogForPrint.sub_line.includes('Washing')
-                          ? `Washing-L${selectedLogForPrint.sub_line.replace('Washing ', '')}`
-                          : `Crusher-${selectedLogForPrint.sub_line}`)
-                      : 'Crusher'}
+                    {(() => {
+                      const sl = selectedLogForPrint?.sub_line;
+                      if (!sl) return 'Crusher';
+                      if (sl.includes('Washing')) return `Washing-W${sl.replace('Washing ', '')}`;
+                      if (sl.includes('Extrusion')) return `Extrusion-E${sl.replace('Extrusion ', '')}`;
+                      if (sl === 'Mixture') return 'Extrusion-MIX';
+                      return `Crusher-${sl}`;
+                    })()}
                   </Text>
                 </View>
                 <View style={styles.previewItem}>
@@ -3102,7 +3940,10 @@ const DashboardScreen = ({ navigation }: any) => {
               </View>
             </View>
 
-            {/* PRINT Button */}
+            {/* REPRINT Button */}
+            <View style={{ backgroundColor: '#DCFCE7', borderRadius: 8, padding: 8, marginBottom: 10, flexDirection: 'row', alignItems: 'center' }}>
+              <Text style={{ fontSize: 12, color: '#15803D', flex: 1 }}>Re-printing saved label — QR already recorded in the system.</Text>
+            </View>
             <TouchableOpacity 
               style={[styles.primaryButton, { backgroundColor: '#17a34a', marginBottom: 0, height: 56 }]}
               onPress={executeListPrint}
@@ -3113,7 +3954,7 @@ const DashboardScreen = ({ navigation }: any) => {
               ) : (
                 <>
                   <PrinterIcon color="#FFF" size={24} style={{ marginRight: 10 }} />
-                  <Text style={[styles.primaryButtonText, { fontSize: 18, fontWeight: '700' }]}>Print Label</Text>
+                  <Text style={[styles.primaryButtonText, { fontSize: 18, fontWeight: '700' }]}>Reprint Label</Text>
                 </>
               )}
             </TouchableOpacity>
@@ -3364,6 +4205,27 @@ const styles = StyleSheet.create({
     display: 'flex' as any,
     flexDirection: 'column' as any
   } : { flex: 1, backgroundColor: '#F8F9FA' },
+  toast: {
+    position: 'absolute',
+    top: Platform.OS === 'web' ? 12 : 56,
+    left: 16,
+    right: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#C62828',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    zIndex: 9999,
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+  },
+  toastText: { color: '#FFF', fontSize: 14, flex: 1, marginRight: 12 },
+  toastClose: { padding: 4 },
   loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, backgroundColor: '#FFF', borderBottomWidth: 1, borderBottomColor: '#EEE' },
   headerLeft: { flexDirection: 'row', alignItems: 'center' },
@@ -3396,6 +4258,58 @@ const styles = StyleSheet.create({
     minHeight: '100%' as any
   } : { paddingBottom: 40 },
   startShiftContainer: { padding: 20, marginTop: 20 },
+  ppicHomeContainer: { paddingVertical: 8 },
+  ppicHomeTitle: { fontSize: 22, fontWeight: '700', color: '#0ea5e9', marginBottom: 8, textAlign: 'center' },
+  ppicHomeSubtitle: { fontSize: 13, color: '#64748b', marginBottom: 16, textAlign: 'center', paddingHorizontal: 8 },
+  ppicHomeCard: { backgroundColor: '#FFF', borderRadius: 12, padding: 16, marginBottom: 16, borderWidth: 1, borderColor: '#E2E8F0' },
+  ppicHomeLabel: { fontSize: 12, fontWeight: '600', color: '#64748b', marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5 },
+  ppicShiftRow: { flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -5 },
+  ppicShiftBtn: { paddingVertical: 12, paddingHorizontal: 16, borderRadius: 10, backgroundColor: '#F1F5F9', borderWidth: 2, borderColor: 'transparent', marginRight: 10, marginBottom: 10 },
+  ppicShiftBtnActive: { backgroundColor: '#E0F2FE', borderColor: '#0ea5e9' },
+  ppicShiftBtnText: { fontSize: 14, fontWeight: '600', color: '#64748b' },
+  ppicShiftBtnTextActive: { color: '#0ea5e9' },
+  /* PPIC section headers */
+  ppicSectionHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
+  ppicSectionTitle: { fontSize: 15, fontWeight: '700', color: '#111' },
+  /* Pulsing live dot */
+  ppicLiveDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#22c55e', marginRight: 8 },
+  ppicLiveDotSmall: { width: 7, height: 7, borderRadius: 4, backgroundColor: '#22c55e', marginRight: 4 },
+  /* Active shift cards on PPIC home */
+  ppicActiveShiftCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F0FDF4', borderRadius: 12, borderWidth: 1, borderColor: '#86EFAC', padding: 14, marginBottom: 10 },
+  ppicActiveShiftName: { fontSize: 15, fontWeight: '700', color: '#166534', flex: 1 },
+  ppicActiveShiftOperator: { fontSize: 12, color: '#4b7a57', marginTop: 2 },
+  ppicActiveShiftMeta: { fontSize: 12, color: '#4b7a57', marginTop: 1 },
+  ppicLivePill: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#DCFCE7', borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2, marginRight: 8 },
+  ppicLivePillText: { fontSize: 10, fontWeight: '800', color: '#15803D', letterSpacing: 0.5 },
+  /* Empty state */
+  ppicEmptyActive: { backgroundColor: '#F8FAFC', borderRadius: 10, padding: 14, alignItems: 'center', marginBottom: 8, borderWidth: 1, borderColor: '#E2E8F0', borderStyle: 'dashed' },
+  ppicEmptyActiveText: { fontSize: 13, color: '#94a3b8' },
+  /* LIVE banner on the shift detail view */
+  ppicLiveBanner: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#DCFCE7', borderRadius: 10, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: '#86EFAC' },
+  ppicLiveDotBanner: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#22c55e', marginRight: 10 },
+  ppicLiveBannerText: { flex: 1, fontSize: 12, color: '#15803D', lineHeight: 18 },
+  /* ── Shift logs: category view ── */
+  shiftLogsSearchBar: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F1F5F9', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 8, borderWidth: 1, borderColor: '#E2E8F0' },
+  shiftLogsSearchInput: { flex: 1, fontSize: 14, color: '#111', marginHorizontal: 8, paddingVertical: 0 },
+  shiftLogCategory: { borderRadius: 12, borderWidth: 1, marginBottom: 14, overflow: 'hidden' },
+  shiftLogCategoryHeader: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: 'rgba(0,0,0,0.06)' },
+  shiftLogCatDot: { width: 8, height: 8, borderRadius: 4, marginRight: 8 },
+  shiftLogCatLabel: { fontSize: 14, fontWeight: '700', flex: 1 },
+  shiftLogCatBadge: { backgroundColor: 'rgba(0,0,0,0.07)', borderRadius: 20, paddingHorizontal: 8, paddingVertical: 2, marginRight: 8 },
+  shiftLogCatBadgeText: { fontSize: 11, fontWeight: '700' },
+  shiftLogCatWeight: { fontSize: 13, fontWeight: '700' },
+  shiftLogRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: 'rgba(0,0,0,0.04)' },
+  shiftLogQr: { fontSize: 13, fontWeight: '600', color: '#1e293b', marginBottom: 2 },
+  shiftLogMeta: { fontSize: 11, color: '#64748b', marginRight: 4 },
+  shiftLogStatusDot: { width: 6, height: 6, borderRadius: 3, marginRight: 4 },
+  shiftLogWeight: { fontSize: 13, fontWeight: '700', color: '#1e293b', marginRight: 10, minWidth: 52, textAlign: 'right' },
+  shiftLogPrintBtn: { width: 30, height: 30, borderRadius: 6, backgroundColor: '#F1F5F9', justifyContent: 'center', alignItems: 'center', marginRight: 6 },
+  shiftLogEditBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#EFF6FF', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 5 },
+  shiftLogEditText: { fontSize: 12, fontWeight: '700', color: '#0ea5e9', marginLeft: 3 },
+  shiftLogPager: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 8 },
+  shiftLogPagerBtn: { width: 30, height: 30, borderRadius: 8, backgroundColor: 'rgba(0,0,0,0.05)', justifyContent: 'center', alignItems: 'center', marginHorizontal: 12 },
+  shiftLogPagerBtnDisabled: { backgroundColor: 'transparent' },
+  shiftLogPagerText: { fontSize: 13, fontWeight: '700', minWidth: 50, textAlign: 'center' },
   startShiftCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#17a34a', borderRadius: 16, padding: 20, elevation: 6 },
   playIconCircle: { width: 48, height: 48, borderRadius: 24, backgroundColor: 'rgba(255,255,255,0.2)', justifyContent: 'center', alignItems: 'center' },
   startShiftText: { flex: 1, marginLeft: 15 },
@@ -3412,6 +4326,7 @@ const styles = StyleSheet.create({
   statValue: { fontSize: 24, fontWeight: '700', color: '#333' },
   statLabel: { fontSize: 12, color: '#666', marginTop: 4 },
   sectionTitle: { fontSize: 12, fontWeight: '700', color: '#999', marginBottom: 12, letterSpacing: 1, textTransform: 'uppercase' },
+  processSectionHeader: { fontSize: 13, fontWeight: '600', color: '#64748b', marginBottom: 8 },
   stationCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFF', borderRadius: 12, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: '#EEE' },
   stationIconBox: { width: 44, height: 44, borderRadius: 10, justifyContent: 'center', alignItems: 'center' },
   stationInfo: { flex: 1, marginLeft: 12 },

@@ -269,9 +269,9 @@ export const printService = {
           <div class="label-container">
             <div class="company-name">${t('print.companyName')}</div>
             <div class="qr-wrap">
-              ${data.qrImage ? `<img src="data:image/png;base64,${data.qrImage}" alt="QR" />` : `<span>${data.qrCode}</span>`}
+              ${data.qrImage ? `<img src="data:image/png;base64,${data.qrImage}" alt="QR" />` : `<span>${data.qrCode || ''}</span>`}
             </div>
-            <div class="qr-id">${data.qrCode}</div>
+            <div class="qr-id">${data.qrCode || ''}</div>
             <div class="info-grid">
               <div class="info-item">
                 <div class="info-label">${t('print.weightLabel')}</div>
@@ -328,6 +328,35 @@ export const printService = {
   printShiftSummary: async (data: any) => {
     const byProducts = Array.isArray(data.byProducts) ? data.byProducts : [];
     const str = (s: unknown) => String(s ?? '');
+    const byStation = data.byStation as { crusher: { outputs: number; weight: string }; washing: { outputs: number; weight: string }; extrusion: { outputs: number; weight: string } } | undefined;
+
+    // Build Excel-style per-process data: material movement (input/output/waste) per process
+    const getWaste = (processLabel: string, name: string) => {
+      const p = byProducts.find((x: any) => (x.processLabel === processLabel || !processLabel) && String(x.name || '').trim() === name);
+      return p ? (typeof p.weight === 'number' ? p.weight : Number(p.weight) || 0) : 0;
+    };
+    const processes = [
+      {
+        key: 'removeLabelCrushing',
+        titleKey: 'print.processRemoveLabelCrusher',
+        outputKg: byStation ? Number(byStation.crusher?.weight || 0) : 0,
+        dustRmwLabelKg: getWaste('removeLabelCrushing', 'Dust Remove Label'),
+        sweepCrusherKg: getWaste('removeLabelCrushing', 'Sweep Floor'),
+      },
+      {
+        key: 'washing',
+        titleKey: 'print.processBetyWashing',
+        outputKg: byStation ? Number(byStation.washing?.weight || 0) : 0,
+        wasteKg: getWaste('washing', 'Dust wet'),
+      },
+      {
+        key: 'extrusion',
+        titleKey: 'print.processExtrusionReport',
+        outputKg: byStation ? Number(byStation.extrusion?.weight || 0) : 0,
+        lumpsKg: getWaste('extrusion', 'Lumps'),
+        sweepKg: getWaste('extrusion', 'Sweep Floor'),
+      },
+    ];
 
     if (Platform.OS === 'web' && typeof window !== 'undefined') {
       try {
@@ -339,10 +368,10 @@ export const printService = {
 
         doc.setFontSize(14);
         doc.setFont('helvetica', 'bold');
-        doc.text(t('print.shiftSummary'), 14, y);
-        y += 10;
+        doc.text(t('print.ppicReportTitle'), 14, y);
+        y += 8;
         doc.setFont('helvetica', 'normal');
-        doc.setFontSize(10);
+        doc.setFontSize(9);
 
         const infoRows: [string, string][] = [
           [t('print.shift'), str(data.shift)],
@@ -350,7 +379,7 @@ export const printService = {
           [t('print.date'), str(data.date)],
         ];
         if (data.remark) {
-          infoRows.push([t('print.remark'), str(data.remark)]);
+          infoRows.push([t('print.remarks'), str(data.remark)]);
         }
         autoTable(doc, {
           body: infoRows,
@@ -360,94 +389,42 @@ export const printService = {
           margin: { left: 14, right: 14 },
           startY: y,
           tableWidth: 120,
-          styles: { fontSize: 10 },
-          columnStyles: { 0: { fontStyle: 'bold', cellWidth: 36 } },
-        });
-        y = (doc as any).lastAutoTable.finalY + 10;
-
-        const byStation = data.byStation as { crusher: { outputs: number; weight: string }; washing: { outputs: number; weight: string }; extrusion: { outputs: number; weight: string } } | undefined;
-        if (byStation) {
-          const machineRows: [string, string, string][] = [
-            [t('print.crusher'), str(byStation.crusher?.outputs ?? 0), str(byStation.crusher?.weight ?? '0.0')],
-            [t('print.washing'), str(byStation.washing?.outputs ?? 0), str(byStation.washing?.weight ?? '0.0')],
-            [t('print.extrusion'), str(byStation.extrusion?.outputs ?? 0), str(byStation.extrusion?.weight ?? '0.0')],
-            [t('print.total'), str(data.totalOutputs), str(data.totalWeight)],
-          ];
-          autoTable(doc, {
-            head: [[t('print.station'), t('print.totalOutputs'), t('print.totalWeight')]],
-            body: machineRows,
-            showHead: 'firstPage',
-            theme: 'plain',
-            tableLineWidth: 0.1,
-            margin: { left: 14, right: 14 },
-            startY: y,
-            tableWidth: 'auto',
-            styles: { fontSize: 10 },
-            headStyles: { fontStyle: 'bold', fillColor: [240, 240, 240] },
-            columnStyles: { 1: { halign: 'right' }, 2: { halign: 'right' } },
-          });
-          y = (doc as any).lastAutoTable.finalY + 10;
-        } else {
-          autoTable(doc, {
-            body: [
-              [t('print.totalOutputs'), str(data.totalOutputs)],
-              [t('print.totalWeight'), str(data.totalWeight)],
-            ] as [string, string][],
-            showHead: 'never',
-            theme: 'plain',
-            tableLineWidth: 0,
-            margin: { left: 14, right: 14 },
-            startY: y,
-            tableWidth: 120,
-            styles: { fontSize: 10 },
-            columnStyles: { 0: { fontStyle: 'bold', cellWidth: 48 } },
-          });
-          y = (doc as any).lastAutoTable.finalY + 10;
-        }
-
-        autoTable(doc, {
-          head: [[t('print.product'), t('print.station'), t('print.category'), t('print.weightKg')]],
-          body: byProducts.length === 0
-            ? [[{ content: t('print.notAvailable'), colSpan: 4, styles: { fontStyle: 'italic', textColor: [100, 100, 100] } }]]
-            : byProducts.map((p: any) => [str(p.name), str(p.stationName), str(p.category), str(p.weight)]),
-          showHead: 'firstPage',
-          theme: 'plain',
-          tableLineWidth: 0,
-          margin: { left: 14, right: 14 },
-          startY: y,
-          tableWidth: 'auto',
           styles: { fontSize: 9 },
-          headStyles: { fontStyle: 'bold', fillColor: [240, 240, 240], textColor: [0, 0, 0] },
-          columnStyles: { 3: { halign: 'right' } },
+          columnStyles: { 0: { fontStyle: 'bold', cellWidth: 28 } },
         });
-        y = (doc as any).lastAutoTable.finalY + 10;
+        y = (doc as any).lastAutoTable.finalY + 8;
 
-        const waste = Array.isArray(data.waste) ? data.waste : [];
-        if (waste.length > 0) {
-          doc.setFontSize(11);
+        // Excel-style: one table per process (Remove label & Crusher, Washing, Extrusion)
+        for (const proc of processes) {
+          doc.setFontSize(10);
           doc.setFont('helvetica', 'bold');
-          doc.text(t('print.waste'), 14, y);
-          y += 8;
+          doc.text(t(proc.titleKey), 14, y);
+          y += 6;
           doc.setFont('helvetica', 'normal');
-          doc.setFontSize(9);
-          const wasteRows = waste.map((w: any) => [str(w.stationName), str(w.subLine), str(w.wasteType), str(w.weight)]);
-          autoTable(doc, {
-            head: [[t('print.station'), t('print.section'), t('print.wasteType'), t('print.weightKg')]],
-            body: wasteRows,
-            showHead: 'firstPage',
-            theme: 'plain',
-            tableLineWidth: 0.1,
-            margin: { left: 14, right: 14 },
-            startY: y,
-            tableWidth: 'auto',
-            styles: { fontSize: 9 },
-            headStyles: { fontStyle: 'bold', fillColor: [240, 240, 240] },
-            columnStyles: { 3: { halign: 'right' } },
-          });
-          y = (doc as any).lastAutoTable.finalY + 6;
+          doc.setFontSize(8);
+
+          if (proc.key === 'removeLabelCrushing') {
+            const head = [[t('print.shiftCol'), t('print.pic'), t('print.inputKg'), t('print.outputKg'), t('print.yieldPct'), t('print.target'), t('print.effPct'), t('print.dustRmwLabelKg'), t('print.sweepCrusherKg'), t('print.wastePct'), t('print.remarks')]];
+            const row = [str(data.shift), str(data.operator), t('print.na'), str(proc.outputKg.toFixed(1)), t('print.na'), t('print.na'), t('print.na'), str(proc.dustRmwLabelKg), str(proc.sweepCrusherKg), '', str(data.remark || '')];
+            autoTable(doc, { head, body: [row], showHead: 'firstPage', theme: 'plain', tableLineWidth: 0.05, margin: { left: 14, right: 14 }, startY: y, tableWidth: 'auto', styles: { fontSize: 7 }, headStyles: { fontStyle: 'bold', fillColor: [220, 230, 241] }, columnStyles: { 2: { halign: 'right' }, 3: { halign: 'right' }, 4: { halign: 'right' }, 6: { halign: 'right' }, 7: { halign: 'right' }, 8: { halign: 'right' }, 9: { halign: 'right' } } });
+          } else if (proc.key === 'washing') {
+            const head = [[t('print.shiftCol'), t('print.pic'), t('print.inputKg'), t('print.outputKg'), t('print.yieldPct'), t('print.target'), t('print.wasteKg'), t('print.wastePct'), t('print.remarks')]];
+            const row = [str(data.shift), str(data.operator), t('print.na'), str(proc.outputKg.toFixed(1)), t('print.na'), t('print.na'), str(proc.wasteKg), '', str(data.remark || '')];
+            autoTable(doc, { head, body: [row], showHead: 'firstPage', theme: 'plain', tableLineWidth: 0.05, margin: { left: 14, right: 14 }, startY: y, tableWidth: 'auto', styles: { fontSize: 7 }, headStyles: { fontStyle: 'bold', fillColor: [232, 245, 233] }, columnStyles: { 2: { halign: 'right' }, 3: { halign: 'right' }, 4: { halign: 'right' }, 6: { halign: 'right' }, 7: { halign: 'right' } } });
+          } else {
+            const head = [[t('print.shiftCol'), t('print.pic'), t('print.inputKg'), t('print.outputKg'), t('print.yieldPct'), t('print.target'), 'Lumps (kg)', t('print.sweepCrusherKg'), t('print.wastePct'), t('print.remarks')]];
+            const row = [str(data.shift), str(data.operator), t('print.na'), str(proc.outputKg.toFixed(1)), t('print.na'), t('print.na'), str(proc.lumpsKg), str(proc.sweepKg), '', str(data.remark || '')];
+            autoTable(doc, { head, body: [row], showHead: 'firstPage', theme: 'plain', tableLineWidth: 0.05, margin: { left: 14, right: 14 }, startY: y, tableWidth: 'auto', styles: { fontSize: 7 }, headStyles: { fontStyle: 'bold', fillColor: [255, 243, 224] }, columnStyles: { 2: { halign: 'right' }, 3: { halign: 'right' }, 4: { halign: 'right' }, 6: { halign: 'right' }, 7: { halign: 'right' }, 8: { halign: 'right' } } });
+          }
+          y = (doc as any).lastAutoTable.finalY + 8;
         }
 
-        doc.save('shift-summary.pdf');
+        doc.setFontSize(9);
+        doc.setFont('helvetica', 'bold');
+        doc.text(`${t('print.total')}: ${str(data.totalOutputs)} ${t('print.totalOutputs')} · ${str(data.totalWeight)} kg`, 14, y);
+        y += 6;
+
+        doc.save('ppic-shift-report.pdf');
         return true;
       } catch (e) {
         console.error('PDF export error:', e);
@@ -456,6 +433,15 @@ export const printService = {
     }
 
     const esc = (s: unknown) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const procHtml = processes.map((proc: any) => {
+      if (proc.key === 'removeLabelCrushing') {
+        return `<div class="process-block" style="background:#e3f2fd;padding:8px 10px;margin-bottom:12px;border-radius:4px;"><div class="section-title">${t('print.processRemoveLabelCrusher')}</div><table class="ppic-table"><thead><tr><th>${t('print.shiftCol')}</th><th>${t('print.pic')}</th><th>${t('print.inputKg')}</th><th>${t('print.outputKg')}</th><th>${t('print.yieldPct')}</th><th>${t('print.target')}</th><th>${t('print.effPct')}</th><th>${t('print.dustRmwLabelKg')}</th><th>${t('print.sweepCrusherKg')}</th><th>${t('print.wastePct')}</th><th>${t('print.remarks')}</th></tr></thead><tbody><tr><td>${esc(data.shift)}</td><td>${esc(data.operator)}</td><td class="num">${t('print.na')}</td><td class="num">${proc.outputKg.toFixed(1)}</td><td class="num">${t('print.na')}</td><td class="num">${t('print.na')}</td><td class="num">${t('print.na')}</td><td class="num">${proc.dustRmwLabelKg}</td><td class="num">${proc.sweepCrusherKg}</td><td class="num"></td><td>${esc(data.remark || '')}</td></tr></tbody></table></div>`;
+      }
+      if (proc.key === 'washing') {
+        return `<div class="process-block" style="background:#e8f5e9;padding:8px 10px;margin-bottom:12px;border-radius:4px;"><div class="section-title">${t('print.processBetyWashing')}</div><table class="ppic-table"><thead><tr><th>${t('print.shiftCol')}</th><th>${t('print.pic')}</th><th>${t('print.inputKg')}</th><th>${t('print.outputKg')}</th><th>${t('print.yieldPct')}</th><th>${t('print.target')}</th><th>${t('print.wasteKg')}</th><th>${t('print.wastePct')}</th><th>${t('print.remarks')}</th></tr></thead><tbody><tr><td>${esc(data.shift)}</td><td>${esc(data.operator)}</td><td class="num">${t('print.na')}</td><td class="num">${proc.outputKg.toFixed(1)}</td><td class="num">${t('print.na')}</td><td class="num">${t('print.na')}</td><td class="num">${proc.wasteKg}</td><td class="num"></td><td>${esc(data.remark || '')}</td></tr></tbody></table></div>`;
+      }
+      return `<div class="process-block" style="background:#fff3e0;padding:8px 10px;margin-bottom:12px;border-radius:4px;"><div class="section-title">${t('print.processExtrusionReport')}</div><table class="ppic-table"><thead><tr><th>${t('print.shiftCol')}</th><th>${t('print.pic')}</th><th>${t('print.inputKg')}</th><th>${t('print.outputKg')}</th><th>${t('print.yieldPct')}</th><th>${t('print.target')}</th><th>Lumps (kg)</th><th>${t('print.sweepCrusherKg')}</th><th>${t('print.wastePct')}</th><th>${t('print.remarks')}</th></tr></thead><tbody><tr><td>${esc(data.shift)}</td><td>${esc(data.operator)}</td><td class="num">${t('print.na')}</td><td class="num">${proc.outputKg.toFixed(1)}</td><td class="num">${t('print.na')}</td><td class="num">${t('print.na')}</td><td class="num">${proc.lumpsKg}</td><td class="num">${proc.sweepKg}</td><td class="num"></td><td>${esc(data.remark || '')}</td></tr></tbody></table></div>`;
+    }).join('');
     const html = `
       <!DOCTYPE html>
       <html>
@@ -559,91 +545,23 @@ export const printService = {
             .byproducts td:nth-child(4) { width: 20%; text-align: right; }
             .byproducts th:nth-child(4) { text-align: right; }
             .byproducts .empty-row td { font-style: italic; color: #666; }
+            .ppic-table { width: 100%; border-collapse: collapse; font-size: 9pt; }
+            .ppic-table th, .ppic-table td { border: 1px solid #999; padding: 5px 6px; text-align: left; }
+            .ppic-table th { background: #f5f5f5; font-weight: 600; }
+            .ppic-table td.num { text-align: right; }
+            .total-line { margin-top: 12px; font-weight: 700; font-size: 10pt; }
           </style>
         </head>
         <body>
-          <h1>${t('print.shiftSummary')}</h1>
+          <h1>${t('print.ppicReportTitle')}</h1>
           <table class="info-table">
             <tr><td>${t('print.shift')}</td><td>${esc(data.shift)}</td></tr>
             <tr><td>${t('print.operator')}</td><td>${esc(data.operator)}</td></tr>
             <tr><td>${t('print.date')}</td><td>${esc(data.date)}</td></tr>
-            ${data.remark ? `<tr><td>${t('print.remark')}</td><td>${esc(data.remark)}</td></tr>` : ''}
+            ${data.remark ? `<tr><td>${t('print.remarks')}</td><td>${esc(data.remark)}</td></tr>` : ''}
           </table>
-          ${(data.byStation) ? `
-          <div class="section-title">${t('print.byMachine')}</div>
-          <table class="byproducts">
-            <thead>
-              <tr>
-                <th>${t('print.byMachine')}</th>
-                <th style="text-align:right">${t('print.totalOutputs')}</th>
-                <th style="text-align:right">${t('print.totalWeight')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr><td>${t('print.crusher')}</td><td style="text-align:right">${esc(data.byStation.crusher?.outputs ?? 0)}</td><td style="text-align:right">${esc(data.byStation.crusher?.weight ?? '0.0')}</td></tr>
-              <tr><td>${t('print.washing')}</td><td style="text-align:right">${esc(data.byStation.washing?.outputs ?? 0)}</td><td style="text-align:right">${esc(data.byStation.washing?.weight ?? '0.0')}</td></tr>
-              <tr><td>${t('print.extrusion')}</td><td style="text-align:right">${esc(data.byStation.extrusion?.outputs ?? 0)}</td><td style="text-align:right">${esc(data.byStation.extrusion?.weight ?? '0.0')}</td></tr>
-              <tr style="font-weight:700"><td>${t('print.total')}</td><td style="text-align:right">${esc(data.totalOutputs)}</td><td style="text-align:right">${esc(data.totalWeight)}</td></tr>
-            </tbody>
-          </table>
-          ` : `
-          <div class="stats">
-            <div class="stat-box">
-              <h3>${t('print.totalOutputs')}</h3>
-              <div class="val">${esc(data.totalOutputs)}</div>
-            </div>
-            <div class="stat-box">
-              <h3>${t('print.totalWeight')}</h3>
-              <div class="val">${esc(data.totalWeight)}</div>
-            </div>
-          </div>
-          `}
-          <div class="section-title">${t('print.byProducts')}</div>
-          <table class="byproducts">
-            <thead>
-              <tr>
-                <th>${t('print.product')}</th>
-                <th>${t('print.station')}</th>
-                <th>${t('print.category')}</th>
-                <th>${t('print.weightKg')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${byProducts.length === 0
-        ? `<tr class="empty-row"><td colspan="4">${t('print.notAvailable')}</td></tr>`
-        : byProducts.map((p: any) => `
-                <tr>
-                  <td>${esc(p.name)}</td>
-                  <td>${esc(p.stationName)}</td>
-                  <td>${esc(p.category)}</td>
-                  <td>${esc(p.weight)}</td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-          ${(data.waste && data.waste.length > 0) ? `
-          <div class="section-title">${t('print.waste')}</div>
-          <table class="byproducts">
-            <thead>
-              <tr>
-                <th>${t('print.station')}</th>
-                <th>${t('print.section')}</th>
-                <th>${t('print.wasteType')}</th>
-                <th>${t('print.weightKg')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${(data.waste as any[]).map((w: any) => `
-                <tr>
-                  <td>${esc(w.stationName)}</td>
-                  <td>${esc(w.subLine)}</td>
-                  <td>${esc(w.wasteType)}</td>
-                  <td>${esc(w.weight)}</td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-          ` : ''}
+          ${procHtml}
+          <div class="total-line">${t('print.total')}: ${esc(data.totalOutputs)} ${t('print.totalOutputs')} · ${esc(data.totalWeight)} kg</div>
         </body>
       </html>
     `;

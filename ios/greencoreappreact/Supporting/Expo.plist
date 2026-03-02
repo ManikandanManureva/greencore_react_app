@@ -3,7 +3,7 @@
 <plist version="1.0">
   <dict>
     <key>EXUpdatesCheckOnLaunch</key>
-    <string>NEVER</string>
+    <string>ALWAYS</string>
     <key>EXUpdatesEnabled</key>
     <false/>
     <key>EXUpdatesLaunchWaitMs</key>
