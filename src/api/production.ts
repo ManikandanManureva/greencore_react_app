@@ -31,6 +31,8 @@ export const productionApi = {
     client.put(`/production/closed-shift/${shiftId}/remark`, { remark }),
   getShiftStatus: (shiftId: number) =>
     client.get(`/production/shift-status/${shiftId}`),
+  getLatestShift: () =>
+    client.get('/production/latest-shift'),
   getShiftLogs: (shiftId: number) =>
     client.get(`/production/logs/${shiftId}`),
   getActiveShift: (shiftTypeId?: number) =>
@@ -45,7 +47,7 @@ export const productionApi = {
     client.get(`/production/shift/${shiftId}/by-products`),
   updateByProducts: (shiftId: number, byProducts: any[]) =>
     client.put(`/production/shift/${shiftId}/by-products`, { byProducts }),
-  searchLogs: (query: string, targetStationId?: number, currentStationId?: number, status?: string, sourceSubLines?: string[]) =>
+  searchLogs: (query: string, targetStationId?: number, currentStationId?: number, status?: string, sourceSubLines?: string[], shiftId?: number) =>
     client.get('/production/search-logs', {
       params: {
         query,
@@ -53,6 +55,7 @@ export const productionApi = {
         currentStationId,
         status,
         ...(sourceSubLines && sourceSubLines.length > 0 && { source_sub_lines: sourceSubLines.join(',') }),
+        ...(shiftId && { shift_id: shiftId }),
       },
     }),
   getCrusherLogs: (subLine?: string, date?: string, search?: string, status?: string, page?: number, limit?: number, shiftId?: number | null) => {
@@ -75,6 +78,17 @@ export const productionApi = {
     if (status) params.status = status;
     if (shiftId) params.shift_id = shiftId;
     return client.get('/production/extrusion-logs', { params });
+  },
+  getFinalPackingLogs: (date?: string, search?: string, status?: string, page?: number, limit?: number, shiftId?: number | null) => {
+    const params: any = { date, search, page, limit };
+    if (status) params.status = status;
+    if (shiftId) params.shift_id = shiftId;
+    return client.get('/production/final-packing-logs', { params });
+  },
+  getPpicStationOverview: (date?: string, shiftTypeId?: number | null) => {
+    const params: any = { date };
+    if (shiftTypeId) params.shift_type_id = shiftTypeId;
+    return client.get('/production/ppic-station-overview', { params });
   },
   updateLogStatus: (outputBagQr: string, status: string, washingLine?: string, extrusionLine?: string, usedLine?: string) => {
     const body: any = { outputBagQr, status };

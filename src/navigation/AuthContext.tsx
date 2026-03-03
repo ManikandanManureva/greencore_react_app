@@ -41,8 +41,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const storedShift = await AsyncStorage.getItem('selected_shift');
       
       if (storedUser && token) {
-        setUser(JSON.parse(storedUser));
-        if (storedShift) setSelectedShiftState(JSON.parse(storedShift));
+        const parsedUser = JSON.parse(storedUser);
+        setUser(parsedUser);
+        if (storedShift) {
+          setSelectedShiftState(JSON.parse(storedShift));
+        } else if (parsedUser.role?.toLowerCase() === 'ppic') {
+          // PPIC doesn't need a real shift — set placeholder so navigator goes to Dashboard
+          const ppicPlaceholder = { id: 0, name: 'PPIC', isPPIC: true };
+          await AsyncStorage.setItem('selected_shift', JSON.stringify(ppicPlaceholder));
+          setSelectedShiftState(ppicPlaceholder);
+        }
         // Verify token with API
         try {
           const response = await client.get('/auth/verify');
@@ -88,18 +96,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         // ── Auto-restore active shift so ShiftSelection is skipped ──
         try {
-          const [activeRes, shiftsRes] = await Promise.all([
-            productionApi.getActiveShift(),
-            masterDataApi.getShifts(),
-          ]);
-          if (activeRes.data.success && activeRes.data.data) {
-            const activeSession = activeRes.data.data;
-            const shiftType = shiftsRes.data.data?.find(
-              (s: any) => s.id === activeSession.shift_type_id
-            );
-            if (shiftType) {
-              await AsyncStorage.setItem('selected_shift', JSON.stringify(shiftType));
-              setSelectedShiftState(shiftType);
+          // PPIC users don't have a shift — set a placeholder so navigator skips ShiftSelection
+          if (userData.role?.toLowerCase() === 'ppic') {
+            const ppicPlaceholder = { id: 0, name: 'PPIC', isPPIC: true };
+            await AsyncStorage.setItem('selected_shift', JSON.stringify(ppicPlaceholder));
+            setSelectedShiftState(ppicPlaceholder);
+          } else {
+            const [activeRes, shiftsRes] = await Promise.all([
+              productionApi.getActiveShift(),
+              masterDataApi.getShifts(),
+            ]);
+            if (activeRes.data.success && activeRes.data.data) {
+              const activeSession = activeRes.data.data;
+              const shiftType = shiftsRes.data.data?.find(
+                (s: any) => s.id === activeSession.shift_type_id
+              );
+              if (shiftType) {
+                await AsyncStorage.setItem('selected_shift', JSON.stringify(shiftType));
+                setSelectedShiftState(shiftType);
+              }
             }
           }
         } catch (shiftErr) {

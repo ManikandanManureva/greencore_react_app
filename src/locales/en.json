@@ -55,6 +55,7 @@
     "closeShift": "Close Shift",
     "shiftDuration": "Shift Duration",
     "shiftActive": "Shift Active",
+    "shiftEnded": "Shift Ended",
     "shiftClosed": "Shift closed",
     "shiftClosedSuccessfully": "Shift closed successfully",
     "shiftSummary": "Shift Summary",

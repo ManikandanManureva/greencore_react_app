@@ -69,6 +69,8 @@ const DashboardScreen = ({ navigation }: any) => {
   // PE (Polyethylene) material flow — separate from PC, does not affect PC logic
   const isPE = user?.role?.toLowerCase() === 'pe';
 
+  const isPPIC = user?.role?.toLowerCase() === 'ppic';
+
   /** Output type options for a given PE raw-material sub-line */
   const getPeOutputOptions = (subLine: string): string[] => {
     if (subLine === 'PE SUPER') return ['Flakes PE SUPER', 'Flakes PE 1'];
@@ -119,7 +121,13 @@ const DashboardScreen = ({ navigation }: any) => {
   // Shift State
   const [isShiftActive, setIsShiftActive] = useState(false);
   const [shiftStartTime, setShiftStartTime] = useState<number | null>(null);
+  const [shiftEndedAt, setShiftEndedAt] = useState<number | null>(null);
+  // Refs so polling interval always sees the latest values without stale closures
+  const backendShiftIdRef = React.useRef<number | null>(null);
+  const isShiftActiveRef = React.useRef<boolean>(false);
   const [shiftDuration, setShiftDuration] = useState('0h 00m 00s');
+  // True when shift is closed — blocks all input/output creation
+  const isShiftEnded = shiftEndedAt !== null;
   const [backendShiftId, setBackendShiftId] = useState<number | null>(null);
   const [shiftLogs, setShiftLogs] = useState<ProductionLog[]>([]);
   
@@ -190,6 +198,16 @@ const DashboardScreen = ({ navigation }: any) => {
   const [extrusionSelectedLineFilter, setExtrusionSelectedLineFilter] = useState<string>('all'); // 'all', 'Extrusion 1', 'Extrusion 2', 'Extrusion 3', 'Mixture'
   const [extrusionSelectedStatusFilter, setExtrusionSelectedStatusFilter] = useState<string>('all'); // 'all', 'pending', 'Completed'
   
+  // Final Packing logs list state
+  const [packingLogs, setPackingLogs] = useState<any[]>([]);
+  const [packingLogsLoading, setPackingLogsLoading] = useState(false);
+  const [packingSelectedDate, setPackingSelectedDate] = useState(formatDateLocal(new Date()));
+  const [packingSearchQuery, setPackingSearchQuery] = useState('');
+  const [packingCurrentPage, setPackingCurrentPage] = useState(1);
+  const [packingTotalPages, setPackingTotalPages] = useState(1);
+  const [packingTotalLogs, setPackingTotalLogs] = useState(0);
+  const [packingSelectedStatusFilter, setPackingSelectedStatusFilter] = useState<string>('all');
+  
   // Scanner State
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const [scanned, setScanned] = useState(false);
@@ -223,6 +241,8 @@ const DashboardScreen = ({ navigation }: any) => {
   const [shiftLogsPageCrusher, setShiftLogsPageCrusher] = useState(1);
   const [shiftLogsPageWashing, setShiftLogsPageWashing] = useState(1);
   const [shiftLogsPageExtrusion, setShiftLogsPageExtrusion] = useState(1);
+  const [shiftLogsPageLabel, setShiftLogsPageLabel] = useState(1);
+  const [shiftLogsPagePacking, setShiftLogsPagePacking] = useState(1);
   const SHIFT_LOGS_PAGE_SIZE = 10;
 
   // PPIC: list and open saved end-shift reports
@@ -238,6 +258,14 @@ const DashboardScreen = ({ navigation }: any) => {
   const [ppicActiveShiftsLoading, setPpicActiveShiftsLoading] = useState(false);
   // Track whether the currently viewed closed/active shift is still live
   const [viewingActiveShift, setViewingActiveShift] = useState(false);
+
+  // PPIC Station Overview
+  const [ppicOverviewDate, setPpicOverviewDate] = useState(() => formatDateLocal(new Date()));
+  const [ppicOverviewShiftId, setPpicOverviewShiftId] = useState<number | null>(null);
+  const [ppicOverviewData, setPpicOverviewData] = useState<any[]>([]);
+  const [ppicOverviewLoading, setPpicOverviewLoading] = useState(false);
+  const [ppicExpandedStation, setPpicExpandedStation] = useState<string | null>(null);
+  const [ppicOverviewSearch, setPpicOverviewSearch] = useState('');
 
   // Saved by-products on start shift page (editable after save)
   const [savedByProductsOnStartPage, setSavedByProductsOnStartPage] = useState<any[]>([]);
@@ -317,7 +345,38 @@ const DashboardScreen = ({ navigation }: any) => {
     }
   };
 
+  const loadPpicOverview = async (date?: string, shiftTypeId?: number | null) => {
+    if (user?.role?.toLowerCase() !== 'ppic') return;
+    setPpicOverviewLoading(true);
+    try {
+      const res = await productionApi.getPpicStationOverview(
+        date ?? ppicOverviewDate,
+        shiftTypeId !== undefined ? shiftTypeId : ppicOverviewShiftId,
+      );
+      if (res.data?.success && Array.isArray(res.data.data)) {
+        setPpicOverviewData(res.data.data);
+      } else {
+        setPpicOverviewData([]);
+      }
+    } catch (e) {
+      setPpicOverviewData([]);
+    } finally {
+      setPpicOverviewLoading(false);
+    }
+  };
+
   useFocusEffect(useCallback(() => { loadPpicActiveShifts(); }, [user?.role]));
+  useFocusEffect(useCallback(() => { if (user?.role?.toLowerCase() === 'ppic') loadPpicOverview(); }, [user?.role]));
+  useFocusEffect(useCallback(() => {
+    if (user?.role?.toLowerCase() !== 'ppic') return;
+    // Load initial closed shifts list for PPIC home
+    setShowClosedReportsModal(false);
+    setClosedShiftsLoading(true);
+    productionApi.getClosedShifts(100, ppicSelectedDate, undefined)
+      .then(res => { if (res.data?.success && Array.isArray(res.data.data)) setClosedShiftsList(res.data.data); else setClosedShiftsList([]); })
+      .catch(() => setClosedShiftsList([]))
+      .finally(() => setClosedShiftsLoading(false));
+  }, [user?.role]));
 
   /** Open any shift (active or closed) into the shift-detail view */
   const handleSelectAnyShift = async (shiftId: number, isActive: boolean) => {
@@ -354,6 +413,8 @@ const DashboardScreen = ({ navigation }: any) => {
       setShiftLogsPageCrusher(1);
       setShiftLogsPageWashing(1);
       setShiftLogsPageExtrusion(1);
+      setShiftLogsPageLabel(1);
+      setShiftLogsPagePacking(1);
       setClosedShiftLogsLoading(true);
       try {
         const logsRes = await productionApi.getShiftLogs(shiftId);
@@ -372,6 +433,15 @@ const DashboardScreen = ({ navigation }: any) => {
     }
   };
 
+  // Helper: format millisecond diff as "Xh YYm ZZs"
+  const formatDuration = (ms: number) => {
+    const totalSec = Math.floor(ms / 1000);
+    const hours = Math.floor(totalSec / 3600);
+    const minutes = Math.floor((totalSec % 3600) / 60);
+    const seconds = totalSec % 60;
+    return `${hours}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`;
+  };
+
   const loadShiftState = async () => {
     if (!selectedShift) return;
     try {
@@ -381,13 +451,42 @@ const DashboardScreen = ({ navigation }: any) => {
         const shift = response.data.data;
         setIsShiftActive(true);
         setShiftStartTime(new Date(shift.start_time).getTime());
+        setShiftEndedAt(null);
         setBackendShiftId(shift.id);
         const logsRes = await productionApi.getShiftLogs(shift.id);
         if (logsRes.data.success) setShiftLogs(logsRes.data.data);
       } else {
-        setIsShiftActive(false);
-        setBackendShiftId(null);
-        setShiftLogs([]);
+        // No active shift — check if there is a recently closed shift today
+        // so we can display "Shift Closed" instead of the start button
+        try {
+          const latestRes = await productionApi.getLatestShift();
+          if (latestRes.data.success && latestRes.data.data) {
+            const latest = latestRes.data.data;
+            if (!latest.is_active && latest.end_time) {
+              const startMs = new Date(latest.start_time).getTime();
+              const endMs = new Date(latest.end_time).getTime();
+              setIsShiftActive(false);
+              setBackendShiftId(latest.id);
+              setShiftStartTime(startMs);
+              setShiftEndedAt(endMs);
+              setShiftDuration(formatDuration(endMs - startMs));
+              const logsRes = await productionApi.getShiftLogs(latest.id);
+              if (logsRes.data.success) setShiftLogs(logsRes.data.data);
+            } else {
+              setIsShiftActive(false);
+              setBackendShiftId(null);
+              setShiftLogs([]);
+            }
+          } else {
+            setIsShiftActive(false);
+            setBackendShiftId(null);
+            setShiftLogs([]);
+          }
+        } catch (_) {
+          setIsShiftActive(false);
+          setBackendShiftId(null);
+          setShiftLogs([]);
+        }
       }
     } catch (e) {
       console.error('Failed to load shift state', e);
@@ -395,6 +494,28 @@ const DashboardScreen = ({ navigation }: any) => {
       setIsLoading(false);
     }
   };
+
+  // Poll every 5s while shift is active to detect PPIC-ended shifts.
+  // Uses refs so the closure always sees the latest backendShiftId / isShiftActive.
+  const checkShiftEndedByPPIC = React.useCallback(async () => {
+    const shiftId = backendShiftIdRef.current;
+    const active = isShiftActiveRef.current;
+    if (!shiftId || !active) return;
+    try {
+      const res = await productionApi.getShiftStatus(shiftId);
+      if (!res.data?.success) return;
+      const s = res.data.data;
+      if (!s.is_active && s.end_time) {
+        // PPIC closed this shift — freeze using DB timestamps
+        const startMs = new Date(s.start_time).getTime();
+        const endMs = new Date(s.end_time).getTime();
+        const duration = formatDuration(endMs - startMs);
+        setIsShiftActive(false);
+        setShiftEndedAt(endMs);
+        setShiftDuration(duration);
+      }
+    } catch (_) {}
+  }, []);
 
   /**
    * Given the actual shift start timestamp and the shift type, return two timestamps:
@@ -494,7 +615,7 @@ const DashboardScreen = ({ navigation }: any) => {
           'Crusher': isPE ? '#0d9488' : '#a855f7',
           'Washing': '#06b6d4',
           'Extrusion': '#f97316',
-          'Final Packaging': '#22c55e',
+          'Re-Packaging': '#22c55e',
         };
         const mappedStations = response.data.data.map((s: any) => ({
           ...s,
@@ -512,16 +633,35 @@ const DashboardScreen = ({ navigation }: any) => {
   useEffect(() => {
     let interval: any;
     if (isShiftActive && shiftStartTime !== null) {
+      // Clear any previously frozen end time when shift restarts
+      setShiftEndedAt(null);
       interval = setInterval(() => {
-        const diff = Date.now() - shiftStartTime;
-        const hours = Math.floor(diff / (1000 * 60 * 60));
-        const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-        const seconds = Math.floor((diff % (1000 * 60)) / 1000);
-        setShiftDuration(`${hours}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`);
+        setShiftDuration(formatDuration(Date.now() - shiftStartTime));
       }, 1000);
+    } else if (!isShiftActive && shiftStartTime !== null && shiftEndedAt === null) {
+      // Shift just ended client-side — freeze at current elapsed (will be overwritten by DB poll)
+      const now = Date.now();
+      setShiftEndedAt(now);
+      setShiftDuration(formatDuration(now - shiftStartTime));
     }
     return () => clearInterval(interval);
   }, [isShiftActive, shiftStartTime]);
+
+  // When shift ends, reset selectedSection so no input/output form stays open
+  useEffect(() => {
+    if (isShiftEnded) {
+      setSelectedSection(null);
+    }
+  }, [isShiftEnded]);
+  useEffect(() => { isShiftActiveRef.current = isShiftActive; }, [isShiftActive]);
+  useEffect(() => { backendShiftIdRef.current = backendShiftId; }, [backendShiftId]);
+
+  // Poll every 30 seconds to detect PPIC-ended shifts.
+  // Single interval for the component lifetime — refs ensure we always read latest values.
+  useEffect(() => {
+    const poll = setInterval(() => { checkShiftEndedByPPIC(); }, 30000);
+    return () => clearInterval(poll);
+  }, [checkShiftEndedByPPIC]);
 
   const showToast = useCallback((message: string) => {
     setToastMessage(message);
@@ -549,6 +689,7 @@ const DashboardScreen = ({ navigation }: any) => {
         setBackendShiftId(response.data.data.id);
         setIsShiftActive(true);
         setShiftStartTime(Date.now());
+        setShiftEndedAt(null);
         setAutoCloseWarningShown(false);
       }
     } catch (error: any) {
@@ -788,10 +929,12 @@ const DashboardScreen = ({ navigation }: any) => {
     setClosedShiftLogs([]);
     setEditingByProductIndex(null);
     setViewingActiveShift(false);
-    // Clear saved by-products on start page
     setSavedByProductsOnStartPage([]);
     setSavedByProductsMeta(null);
-    navigation.navigate('ShiftSelection');
+    // PPIC stays on their home dashboard — no ShiftSelection navigation needed
+    if (user?.role?.toLowerCase() !== 'ppic') {
+      navigation.navigate('ShiftSelection');
+    }
   };
 
   const handleOpenClosedReports = async (useDate?: string, useShiftId?: number | null) => {
@@ -848,6 +991,8 @@ const DashboardScreen = ({ navigation }: any) => {
       setShiftLogsPageCrusher(1);
       setShiftLogsPageWashing(1);
       setShiftLogsPageExtrusion(1);
+      setShiftLogsPageLabel(1);
+      setShiftLogsPagePacking(1);
       setClosedShiftLogsLoading(true);
       try {
         const logsRes = await productionApi.getShiftLogs(shiftId);
@@ -955,8 +1100,16 @@ const DashboardScreen = ({ navigation }: any) => {
         setWashingLogs(prev => prev.map(log => 
           log.id === editingLogWeight.id ? { ...log, weight: w } : log
         ));
-      } else if (selectedStation?.name === 'Extrusion') {
+      } else if (selectedStation?.name === 'Extrusion & Packaging') {
         setExtrusionLogs(prev => prev.map(log => 
+          log.id === editingLogWeight.id ? { ...log, weight: w } : log
+        ));
+      } else if (
+        selectedStation?.id === 5 ||
+        selectedStation?.name?.toLowerCase().includes('final') ||
+        selectedStation?.name?.toLowerCase().includes('re-packaging')
+      ) {
+        setPackingLogs(prev => prev.map(log =>
           log.id === editingLogWeight.id ? { ...log, weight: w } : log
         ));
       }
@@ -993,7 +1146,8 @@ const DashboardScreen = ({ navigation }: any) => {
         statusFilter,
         currentPage,
         10,
-        backendShiftId   // scope to current shift — prevents mixing logs from other shifts of the same day
+        // Only scope to current shift when viewing today — for past dates use the date filter
+        selectedDate === formatDateLocal(new Date()) ? backendShiftId : undefined
       );
       if (response.data.success) {
         setCrusherLogs(response.data.data);
@@ -1023,7 +1177,7 @@ const DashboardScreen = ({ navigation }: any) => {
         statusFilter,
         washingCurrentPage,
         10,
-        backendShiftId   // scope to current shift
+        washingSelectedDate === formatDateLocal(new Date()) ? backendShiftId : undefined
       );
       if (response.data.success) {
         setWashingLogs(response.data.data);
@@ -1053,7 +1207,7 @@ const DashboardScreen = ({ navigation }: any) => {
         statusFilter,
         extrusionCurrentPage,
         10,
-        backendShiftId   // scope to current shift
+        extrusionSelectedDate === formatDateLocal(new Date()) ? backendShiftId : undefined
       );
       if (response.data.success) {
         setExtrusionLogs(response.data.data);
@@ -1067,6 +1221,30 @@ const DashboardScreen = ({ navigation }: any) => {
     }
   };
 
+  const loadPackingLogs = async () => {
+    try {
+      setPackingLogsLoading(true);
+      const statusFilter = packingSelectedStatusFilter !== 'all' ? packingSelectedStatusFilter : undefined;
+      const response = await productionApi.getFinalPackingLogs(
+        packingSelectedDate,
+        packingSearchQuery || undefined,
+        statusFilter,
+        packingCurrentPage,
+        10,
+        packingSelectedDate === formatDateLocal(new Date()) ? backendShiftId : undefined,
+      );
+      if (response.data.success) {
+        setPackingLogs(response.data.data);
+        setPackingTotalPages(response.data.pagination.totalPages);
+        setPackingTotalLogs(response.data.pagination.total);
+      }
+    } catch (error) {
+      console.error('Error loading packing logs:', error);
+    } finally {
+      setPackingLogsLoading(false);
+    }
+  };
+
   useEffect(() => {
     // Clear selected input bag when station or section changes
     setSelectedInputBag(null);
@@ -1074,6 +1252,66 @@ const DashboardScreen = ({ navigation }: any) => {
     setSuggestedBags([]);
     setShowSuggestions(false);
   }, [selectedStation, selectedSection, selectedSubLine]);
+
+  // Calculate crusher totals from shiftLogs for the current sub-line
+  useEffect(() => {
+    const isCrusherStation = selectedStation?.name?.toLowerCase().includes('crusher') ||
+                             selectedStation?.code === 'CRS';
+    if (!isCrusherStation || !backendShiftId || !selectedSubLine) {
+      if (selectedStation?.name?.toLowerCase().includes('crusher')) {
+        setCurrentViewBags(0);
+        setCurrentViewWeight(0);
+      }
+      return;
+    }
+    const logs = shiftLogs.filter((log: any) =>
+      log.station_id === selectedStation?.id &&
+      log.shift_id === backendShiftId &&
+      log.sub_line === selectedSubLine
+    );
+    setCurrentViewBags(logs.length);
+    setCurrentViewWeight(logs.reduce((acc: number, log: any) => acc + (Number(log.weight) || 0), 0));
+  }, [shiftLogs, selectedStation, selectedSubLine, backendShiftId]);
+
+  // Calculate washing totals from shiftLogs for the current sub-line
+  useEffect(() => {
+    const isWashingStation = selectedStation?.name?.toLowerCase().includes('washing') ||
+                             selectedStation?.code === 'WSH';
+    if (!isWashingStation || !backendShiftId || !selectedSubLine) {
+      if (isWashingStation) {
+        setCurrentViewBags(0);
+        setCurrentViewWeight(0);
+      }
+      return;
+    }
+    const logs = shiftLogs.filter((log: any) =>
+      log.station_id === selectedStation?.id &&
+      log.shift_id === backendShiftId &&
+      log.sub_line === selectedSubLine
+    );
+    setCurrentViewBags(logs.length);
+    setCurrentViewWeight(logs.reduce((acc: number, log: any) => acc + (Number(log.weight) || 0), 0));
+  }, [shiftLogs, selectedStation, selectedSubLine, backendShiftId]);
+
+  // Calculate final packing totals from shiftLogs
+  useEffect(() => {
+    const isPackingStation = selectedStation?.id === 5 ||
+                             selectedStation?.name?.toLowerCase().includes('final') ||
+                             selectedStation?.name?.toLowerCase().includes('re-packaging');
+    if (!isPackingStation || !backendShiftId) {
+      if (isPackingStation) {
+        setCurrentViewBags(0);
+        setCurrentViewWeight(0);
+      }
+      return;
+    }
+    const logs = shiftLogs.filter((log: any) =>
+      log.station_id === selectedStation?.id &&
+      log.shift_id === backendShiftId
+    );
+    setCurrentViewBags(logs.length);
+    setCurrentViewWeight(logs.reduce((acc: number, log: any) => acc + (Number(log.weight) || 0), 0));
+  }, [shiftLogs, selectedStation, backendShiftId]);
 
   // Calculate extrusion totals based on material type and shift
   useEffect(() => {
@@ -1122,10 +1360,14 @@ const DashboardScreen = ({ navigation }: any) => {
       loadWashingLogs();
     }
     // Load logs when in Extrusion station view (whether sub-line is selected or not)
-    if (selectedStation?.name === 'Extrusion') {
+    if (selectedStation?.name === 'Extrusion & Packaging') {
       loadExtrusionLogs();
     }
-  }, [selectedSubLine, selectedDate, searchQuery, currentPage, selectedStation, selectedLineFilter, selectedStatusFilter, washingSelectedDate, washingSearchQuery, washingCurrentPage, washingSelectedLineFilter, washingSelectedStatusFilter, extrusionSelectedDate, extrusionSearchQuery, extrusionCurrentPage, extrusionSelectedLineFilter, extrusionSelectedStatusFilter]);
+    // Load logs when in Final Packaging station view
+    if (selectedStation?.id === 5 || selectedStation?.name?.toLowerCase().includes('final') || selectedStation?.name?.toLowerCase().includes('re-packaging')) {
+      loadPackingLogs();
+    }
+  }, [selectedSubLine, selectedDate, searchQuery, currentPage, selectedStation, selectedLineFilter, selectedStatusFilter, washingSelectedDate, washingSearchQuery, washingCurrentPage, washingSelectedLineFilter, washingSelectedStatusFilter, extrusionSelectedDate, extrusionSearchQuery, extrusionCurrentPage, extrusionSelectedLineFilter, extrusionSelectedStatusFilter, packingSelectedDate, packingSearchQuery, packingCurrentPage, packingSelectedStatusFilter]);
 
   useEffect(() => {
     if (showShiftClosedView && closedShiftId) {
@@ -1136,7 +1378,10 @@ const DashboardScreen = ({ navigation }: any) => {
   const handleStationSelect = (station: Station) => {
     setCurrentViewBags(0);
     setCurrentViewWeight(0);
-    if (station.name === 'Label Removal' || station.name === 'Crusher' || station.name === 'Washing' || station.name === 'Extrusion') {
+    if (station.name === 'Label Removal' || station.name === 'Crusher' || station.name === 'Washing' || station.name === 'Extrusion & Packaging') {
+      setSelectedStation(station); setSelectedSection(null);
+    } else if (isShiftEnded) {
+      // Shift ended — go straight to view-only, skip the INPUT/OUTPUT modal
       setSelectedStation(station); setSelectedSection(null);
     } else {
       setPendingStation(station); setShowStationModal(true);
@@ -1225,6 +1470,7 @@ const DashboardScreen = ({ navigation }: any) => {
           selectedStation!.id,
           'pending',
           ['3E', 'Rapid'],
+          backendShiftId ?? undefined,
         );
         if (response.data.success && response.data.data.length > 0) {
           const matchedBatch = response.data.data[0];
@@ -1238,7 +1484,7 @@ const DashboardScreen = ({ navigation }: any) => {
       }
 
       if (selectedSection === 'input' && (selectedStation?.id === 3 || selectedStation?.name?.toLowerCase().includes('washing'))) {
-        // Washing input: Crusher batches (station_id = 2) with status pending only
+        // Washing input: only crusher bags (3E, Rapid, Betty) with pending status
         targetStationId = 2;
         statusFilter = 'pending';
         expectedStationName = 'crusher';
@@ -1254,7 +1500,7 @@ const DashboardScreen = ({ navigation }: any) => {
           expectedStationName = 'washing';
         }
         statusFilter = 'pending';
-      } else if (selectedSection === 'input' && (selectedStation?.id === 5 || selectedStation?.name?.toLowerCase().includes('final') || selectedStation?.name?.toLowerCase().includes('packing'))) {
+      } else if (selectedSection === 'input' && (selectedStation?.id === 5 || selectedStation?.name?.toLowerCase().includes('final') || selectedStation?.name?.toLowerCase().includes('re-packaging'))) {
         // Final Packaging input: Extrusion batches for PC/PET flow, Washing batches for PE flow (no Extrusion station)
         const extStation = stations.find((s: Station) => s.name?.toLowerCase().includes('extrusion') || (s as any).code === 'EXT');
         const washStation = stations.find((s: Station) => s.name?.toLowerCase().includes('washing') || (s as any).code === 'WSH');
@@ -1270,7 +1516,19 @@ const DashboardScreen = ({ navigation }: any) => {
 
       // If we have a target station, validate the QR code
       if (targetStationId && statusFilter) {
-        const response = await productionApi.searchLogs(qrCode, targetStationId, selectedStation?.id, statusFilter);
+        // For washing: restrict source bags to crusher sub-lines only (3E, Rapid, Betty)
+        const isWashingInput = selectedSection === 'input' &&
+          (selectedStation?.id === 3 || selectedStation?.name?.toLowerCase().includes('washing'));
+        const sourceSubLines = isWashingInput ? ['3E', 'Rapid', 'Betty'] : undefined;
+
+        const response = await productionApi.searchLogs(
+          qrCode,
+          targetStationId,
+          selectedStation?.id,
+          statusFilter,
+          sourceSubLines,
+          backendShiftId ?? undefined,
+        );
         if (response.data.success && response.data.data.length > 0) {
           // Found matching batch - show batch no., user taps Save to process (same as manual search)
           const matchedBatch = response.data.data[0];
@@ -1301,6 +1559,7 @@ const DashboardScreen = ({ navigation }: any) => {
 
   const handleLogProduction = async () => {
     if (!weightInput || !backendShiftId || !selectedStation) return;
+    if (isShiftEnded) { Alert.alert('Shift Ended', 'Cannot add output after shift has ended.'); return; }
     try {
       setIsLoading(true);
       setIsCurrentLogSaved(false);
@@ -1335,7 +1594,7 @@ const DashboardScreen = ({ navigation }: any) => {
           line: lineDisplay,
           date: new Date().toLocaleDateString()
         });
-        setPreviewBagStatus((selectedStation.id === 2 || selectedStation.id === 3 || selectedStation.id === 4) ? 'pending' : 'Completed');
+        setPreviewBagStatus('pending');
         setShowPrintPreview(true);
       } else {
         Alert.alert(t('common.error'), response.data?.message || t('messages.failedToGenerateQR'));
@@ -1349,6 +1608,7 @@ const DashboardScreen = ({ navigation }: any) => {
 
   const handleSaveProduction = async () => {
     if (!previewData || !backendShiftId || !selectedStation) return;
+    if (isShiftEnded) { Alert.alert('Shift Ended', 'Cannot add output after shift has ended.'); return; }
     try {
       setIsLoading(true);
       // Worker-selected status: pending = temporary jumbo bag, Completed = final jumbo bag
@@ -1382,7 +1642,26 @@ const DashboardScreen = ({ navigation }: any) => {
         const savedLog = response.data.data;
         const updatedLogs = [...shiftLogs, savedLog];
         setShiftLogs(updatedLogs);
-        
+
+        // When Betty saves its output, mark the consumed 3E/Rapid input bag as Completed
+        if (
+          selectedStation?.name?.toLowerCase().includes('crusher') &&
+          selectedSubLine === 'Betty' &&
+          selectedInputBag?.output_bag_qr
+        ) {
+          try {
+            await productionApi.updateLogStatus(
+              selectedInputBag.output_bag_qr,
+              'Completed',
+              undefined,
+              undefined,
+              'Betty',
+            );
+          } catch (err) {
+            console.error('Error marking input bag as Completed:', err);
+          }
+        }
+
         // Reload shift logs to get updated data (especially for extrusion totals calculation)
         if (backendShiftId) {
           try {
@@ -1395,12 +1674,16 @@ const DashboardScreen = ({ navigation }: any) => {
           }
         }
         
-        // For other stations (not extrusion), reset counters
-        if (selectedStation?.name !== 'Extrusion') {
+        // Crusher, Washing, Final Packing and Extrusion use useEffect to auto-recalculate from shiftLogs
+        if (selectedStation?.name !== 'Extrusion & Packaging' &&
+            !selectedStation?.name?.toLowerCase().includes('crusher') &&
+            !selectedStation?.name?.toLowerCase().includes('washing') &&
+            !selectedStation?.name?.toLowerCase().includes('final') &&
+            !selectedStation?.name?.toLowerCase().includes('re-packaging')) {
           setCurrentViewBags(0);
           setCurrentViewWeight(0);
         }
-        // For extrusion, the useEffect will automatically recalculate totals
+        // For extrusion/crusher/washing, the useEffect will automatically recalculate totals
 
         setIsCurrentLogSaved(true); // Mark as saved
         setWeightInput(''); // Clear input field immediately after save
@@ -1434,7 +1717,7 @@ const DashboardScreen = ({ navigation }: any) => {
 
     // ── PE-specific back navigation ─────────────────────────────────────────
     if (isPE) {
-      if (selectedStation?.name === 'Extrusion') {
+      if (selectedStation?.name === 'Extrusion & Packaging') {
         if (selectedSection) {
           setSelectedSection(null);
         } else if (selectedSubLine) {
@@ -1459,7 +1742,7 @@ const DashboardScreen = ({ navigation }: any) => {
     }
 
     // ── PC/PET back navigation (unchanged) ───────────────────────────────────
-    if (selectedStation?.name === 'Extrusion' && selectedSubLine) {
+    if (selectedStation?.name === 'Extrusion & Packaging' && selectedSubLine) {
       if (selectedSection) {
         setSelectedSection(null);
       } else {
@@ -1578,6 +1861,7 @@ const DashboardScreen = ({ navigation }: any) => {
           selectedStation!.id,  // current station = Crusher (to exclude already-in-use bags)
           'pending',
           ['3E', 'Rapid'],      // only 3E and Rapid sub-lines
+          backendShiftId ?? undefined,
         );
         if (response.data.success) {
           setSuggestedBags(response.data.data);
@@ -1589,7 +1873,7 @@ const DashboardScreen = ({ navigation }: any) => {
         return;
       }
 
-      if (selectedStation?.id === 3) {
+      if (selectedStation?.id === 3 || selectedStation?.name?.toLowerCase().includes('washing')) {
         // For washing, only search if user has typed something
         if (!text || text.trim().length === 0) {
           setSuggestedBags([]);
@@ -1598,7 +1882,14 @@ const DashboardScreen = ({ navigation }: any) => {
         }
         targetStationId = 2; // Washing searches from Crusher
         statusFilter = 'pending'; // Only show pending crusher batches
-        const response = await productionApi.searchLogs(text, targetStationId, selectedStation.id, statusFilter);
+        const response = await productionApi.searchLogs(
+          text,
+          targetStationId,
+          selectedStation.id,
+          statusFilter,
+          ['3E', 'Rapid', 'Betty'], // Only crusher sub-lines are valid washing inputs
+          backendShiftId ?? undefined,
+        );
         if (response.data.success) { 
           setSuggestedBags(response.data.data); 
           setShowSuggestions(response.data.data.length > 0); 
@@ -1642,7 +1933,7 @@ const DashboardScreen = ({ navigation }: any) => {
       // Final Packaging: Extrusion batches for PC/PET flow, Washing batches for PE flow (no Extrusion station)
       const isFinalPackaging = selectedStation?.id === 5 ||
         selectedStation?.name?.toLowerCase().includes('final') ||
-        selectedStation?.name?.toLowerCase().includes('packing');
+        selectedStation?.name?.toLowerCase().includes('re-packaging');
       if (isFinalPackaging) {
         if (!text || text.trim().length === 0) {
           setSuggestedBags([]);
@@ -1696,7 +1987,7 @@ const DashboardScreen = ({ navigation }: any) => {
       case 'Crusher': return <Package {...props} />;
       case 'Washing': return <Droplets {...props} />;
       case 'Extrusion': return <Zap {...props} />;
-      case 'Final Packaging': return <Box {...props} />;
+      case 'Re-Packaging': return <Box {...props} />;
       default: return <Package {...props} />;
     }
   };
@@ -1716,6 +2007,7 @@ const DashboardScreen = ({ navigation }: any) => {
       <View style={styles.header}>
         <View style={styles.headerLeft}>
           {!selectedStation && !showEndShiftSummary && !showShiftClosedView ? (
+              isPPIC ? null : (
               <TouchableOpacity onPress={() => {
                 // Clear saved by-products when navigating to shift selection
                 setSavedByProductsOnStartPage([]);
@@ -1726,6 +2018,7 @@ const DashboardScreen = ({ navigation }: any) => {
                 <Text style={styles.pillLabel}>Shift</Text>
                 <Text style={styles.pillValue}>{selectedShift?.name || 'Shift 1'}</Text>
               </TouchableOpacity>
+              )
           ) : (
             <TouchableOpacity onPress={handleBack} style={styles.backButton}>
               <ArrowLeft color="#333" size={24} />
@@ -1733,7 +2026,7 @@ const DashboardScreen = ({ navigation }: any) => {
                 <Text style={styles.stationTitle}>
                   {showShiftClosedView ? (viewingActiveShift ? 'Active Shift' : 'Shift closed') : showEndShiftSummary ? 'End Shift' : (selectedStation?.name === 'Washing' ? selectedStation?.name : (selectedSubLine ? `${selectedStation?.name} (${selectedSubLine})` : selectedStation?.name))}
                 </Text>
-                {!showEndShiftSummary && !showShiftClosedView && <View style={styles.contextPills}><Text style={styles.smallPill}>{selectedShift?.name}</Text></View>}
+                {!showEndShiftSummary && !showShiftClosedView && !isPPIC && <View style={styles.contextPills}><Text style={styles.smallPill}>{selectedShift?.name}</Text></View>}
               </View>
             </TouchableOpacity>
           )}
@@ -1807,9 +2100,11 @@ const DashboardScreen = ({ navigation }: any) => {
                   const st = stations.find(s => s.id === log.station_id);
                   const name = (st?.name ?? '').toLowerCase();
                   const code = ((st as any)?.code ?? '').toUpperCase();
+                  if (code === 'LBL' || name.includes('label')) return 'label';
                   if (code === 'CRS' || name.includes('crusher')) return 'crusher';
                   if (code === 'WSH' || name.includes('washing')) return 'washing';
                   if (code === 'EXT' || code === 'EXTR' || name.includes('extrusion')) return 'extrusion';
+                  if (code === 'PKG' || name.includes('re-packaging') || name.includes('final') || name.includes('packing')) return 'packing';
                   return 'other';
                 };
                 const q = shiftLogsSearch.trim().toLowerCase();
@@ -1822,10 +2117,12 @@ const DashboardScreen = ({ navigation }: any) => {
                   return qr.includes(q) || sn.includes(q) || sl.includes(q);
                 });
                 const cats: { key: string; label: string; color: string; accent: string; page: number; setPage: (p: number) => void }[] = [
-                  { key: 'crusher',   label: 'Crusher',   color: '#FFF7ED', accent: '#EA580C', page: shiftLogsPageCrusher,   setPage: setShiftLogsPageCrusher },
-                  { key: 'washing',   label: 'Washing',   color: '#EFF6FF', accent: '#2563EB', page: shiftLogsPageWashing,   setPage: setShiftLogsPageWashing },
-                  { key: 'extrusion', label: 'Extrusion', color: '#F0FDF4', accent: '#16A34A', page: shiftLogsPageExtrusion, setPage: setShiftLogsPageExtrusion },
-                  { key: 'other',     label: 'Other',     color: '#F8FAFC', accent: '#64748B', page: 1,                      setPage: () => {} },
+                  { key: 'label',     label: 'Label Removal',        color: '#FDF4FF', accent: '#9333EA', page: shiftLogsPageLabel,     setPage: setShiftLogsPageLabel },
+                  { key: 'crusher',   label: 'Crusher',              color: '#FFF7ED', accent: '#EA580C', page: shiftLogsPageCrusher,   setPage: setShiftLogsPageCrusher },
+                  { key: 'washing',   label: 'Washing',              color: '#EFF6FF', accent: '#2563EB', page: shiftLogsPageWashing,   setPage: setShiftLogsPageWashing },
+                  { key: 'extrusion', label: 'Extrusion & Packaging',color: '#F0FDF4', accent: '#16A34A', page: shiftLogsPageExtrusion, setPage: setShiftLogsPageExtrusion },
+                  { key: 'packing',   label: 'Re-Packaging',         color: '#F0FDFA', accent: '#0D9488', page: shiftLogsPagePacking,   setPage: setShiftLogsPagePacking },
+                  { key: 'other',     label: 'Other',                color: '#F8FAFC', accent: '#64748B', page: 1,                      setPage: () => {} },
                 ];
                 return (
                   <View style={{ marginTop: 16 }}>
@@ -1839,7 +2136,7 @@ const DashboardScreen = ({ navigation }: any) => {
                         placeholder="Search QR code, station, sub-line…"
                         placeholderTextColor="#94a3b8"
                         value={shiftLogsSearch}
-                        onChangeText={(t) => { setShiftLogsSearch(t); setShiftLogsPageCrusher(1); setShiftLogsPageWashing(1); setShiftLogsPageExtrusion(1); }}
+                        onChangeText={(t) => { setShiftLogsSearch(t); setShiftLogsPageCrusher(1); setShiftLogsPageWashing(1); setShiftLogsPageExtrusion(1); setShiftLogsPageLabel(1); setShiftLogsPagePacking(1); }}
                         returnKeyType="search"
                       />
                       {shiftLogsSearch !== '' && (
@@ -2062,7 +2359,7 @@ const DashboardScreen = ({ navigation }: any) => {
             <Text style={styles.afterCloseHint}>{t('dashboard.afterCloseHint')}</Text>
             <TouchableOpacity style={styles.closeShiftBtn} onPress={handleCloseShift} disabled={isLoading}>{isLoading ? <ActivityIndicator color="#FFF" /> : <Text style={styles.closeShiftText}>{t('dashboard.closeShift')}</Text>}</TouchableOpacity>
           </View>
-        ) : !isShiftActive ? (
+        ) : !isShiftActive && !isShiftEnded ? (
           <View style={styles.startShiftContainer}>
             {user?.role?.toLowerCase() === 'ppic' ? (
               <View style={styles.ppicHomeContainer}>
@@ -2086,7 +2383,8 @@ const DashboardScreen = ({ navigation }: any) => {
                     <Text style={styles.ppicEmptyActiveText}>No shifts are currently running.</Text>
                   </View>
                 ) : (
-                  ppicActiveShifts.map((s: any) => (
+                  <View>
+                  {ppicActiveShifts.map((s: any) => (
                     <TouchableOpacity
                       key={s.shiftId}
                       style={styles.ppicActiveShiftCard}
@@ -2108,30 +2406,40 @@ const DashboardScreen = ({ navigation }: any) => {
                       </View>
                       <ChevronRight color="#17a34a" size={20} />
                     </TouchableOpacity>
-                  ))
+                  ))}
+                  </View>
                 )}
 
                 {/* ── Closed Reports ── */}
                 <View style={[styles.ppicSectionHeader, { marginTop: 20 }]}>
                   <FileText color="#0ea5e9" size={14} />
                   <Text style={[styles.ppicSectionTitle, { marginLeft: 6, color: '#0ea5e9' }]}>Closed Reports</Text>
+                  <TouchableOpacity onPress={() => handleOpenClosedReports(ppicSelectedDate, ppicSelectedShiftId)} style={{ marginLeft: 'auto' }}>
+                    <Text style={{ fontSize: 12, color: '#0ea5e9', fontWeight: '600' }}>Refresh</Text>
+                  </TouchableOpacity>
                 </View>
 
-                <Text style={styles.ppicHomeSubtitle}>{t('dashboard.ppicHomeSubtitle')}</Text>
+                {/* Date filter */}
                 <View style={styles.ppicHomeCard}>
                   <Text style={styles.ppicHomeLabel}>{t('dashboard.ppicSelectDate')}</Text>
                   <StationDatePicker
                     value={parseDateLocal(ppicSelectedDate)}
-                    onChange={(date) => setPpicSelectedDate(formatDateLocal(date))}
+                    onChange={(date) => {
+                      const d = formatDateLocal(date);
+                      setPpicSelectedDate(d);
+                      handleOpenClosedReports(d, ppicSelectedShiftId);
+                    }}
                     maximumDate={maxDate}
                   />
                 </View>
+
+                {/* Shift filter */}
                 <View style={styles.ppicHomeCard}>
                   <Text style={styles.ppicHomeLabel}>{t('dashboard.ppicSelectShift')}</Text>
                   <View style={styles.ppicShiftRow}>
                     <TouchableOpacity
                       style={[styles.ppicShiftBtn, ppicSelectedShiftId === null && styles.ppicShiftBtnActive]}
-                      onPress={() => setPpicSelectedShiftId(null)}
+                      onPress={() => { setPpicSelectedShiftId(null); handleOpenClosedReports(ppicSelectedDate, null); }}
                     >
                       <Text style={[styles.ppicShiftBtnText, ppicSelectedShiftId === null && styles.ppicShiftBtnTextActive]}>{t('dashboard.all')}</Text>
                     </TouchableOpacity>
@@ -2139,22 +2447,222 @@ const DashboardScreen = ({ navigation }: any) => {
                       <TouchableOpacity
                         key={s.id}
                         style={[styles.ppicShiftBtn, ppicSelectedShiftId === s.id && styles.ppicShiftBtnActive]}
-                        onPress={() => setPpicSelectedShiftId(s.id)}
+                        onPress={() => { setPpicSelectedShiftId(s.id); handleOpenClosedReports(ppicSelectedDate, s.id); }}
                       >
                         <Text style={[styles.ppicShiftBtnText, ppicSelectedShiftId === s.id && styles.ppicShiftBtnTextActive]}>{s.name}</Text>
                       </TouchableOpacity>
                     ))}
                   </View>
                 </View>
-                <TouchableOpacity style={[styles.closeShiftBtn, { marginTop: 16, backgroundColor: '#0ea5e9' }]} onPress={() => handleOpenClosedReports(ppicSelectedDate, ppicSelectedShiftId)}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
-                    <FileText color="#FFF" size={20} />
-                    <Text style={[styles.closeShiftText, { marginLeft: 8 }]}>{t('dashboard.viewEditClosedReports')}</Text>
+
+                {/* Inline list of closed shifts */}
+                {closedShiftsLoading ? (
+                  <View style={{ alignItems: 'center', paddingVertical: 16 }}>
+                    <ActivityIndicator size="small" color="#0ea5e9" />
+                    <Text style={{ fontSize: 12, color: '#64748b', marginTop: 6 }}>Loading reports…</Text>
                   </View>
-                </TouchableOpacity>
+                ) : closedShiftsList.length === 0 ? (
+                  <View style={[styles.ppicEmptyActive, { marginTop: 4 }]}>
+                    <Text style={styles.ppicEmptyActiveText}>No closed shifts found for this date / shift.</Text>
+                  </View>
+                ) : (
+                  <View>
+                  {closedShiftsList.map((item: any) => (
+                    <TouchableOpacity
+                      key={item.shiftId}
+                      style={[styles.ppicActiveShiftCard, { marginBottom: 8, borderLeftColor: '#0ea5e9' }]}
+                      onPress={() => handleSelectClosedShift(item.shiftId)}
+                    >
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 14, fontWeight: '700', color: '#1e293b' }}>{item.shiftName} — {item.date}</Text>
+                        <Text style={{ fontSize: 12, color: '#475569', marginTop: 2 }}>{item.operatorName}</Text>
+                        {item.materialTypeName ? <Text style={{ fontSize: 11, color: '#94a3b8', marginTop: 1 }}>{item.materialTypeName}</Text> : null}
+                      </View>
+                      <View style={{ alignItems: 'flex-end' }}>
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: '#0ea5e9' }}>{item.totalOutputs} bags</Text>
+                        <Text style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>{item.totalWeight} kg</Text>
+                      </View>
+                      <ChevronRight color="#CBD5E1" size={18} style={{ marginLeft: 6 }} />
+                    </TouchableOpacity>
+                  ))}
+                  </View>
+                )}
+
+                {/* ── Station Overview ── */}
+                <View style={[styles.ppicSectionHeader, { marginTop: 24 }]}>
+                  <Package color="#475569" size={14} />
+                  <Text style={[styles.ppicSectionTitle, { marginLeft: 6, color: '#475569' }]}>Station Overview</Text>
+                  <TouchableOpacity onPress={() => loadPpicOverview()} style={{ marginLeft: 'auto' }}>
+                    <Text style={{ fontSize: 12, color: '#0ea5e9', fontWeight: '600' }}>Refresh</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Date Picker */}
+                <View style={styles.ppicHomeCard}>
+                  <Text style={styles.ppicHomeLabel}>Select Date</Text>
+                  <StationDatePicker
+                    value={parseDateLocal(ppicOverviewDate)}
+                    onChange={(date) => {
+                      const d = formatDateLocal(date);
+                      setPpicOverviewDate(d);
+                      setPpicExpandedStation(null);
+                      loadPpicOverview(d, ppicOverviewShiftId);
+                    }}
+                    maximumDate={maxDate}
+                  />
+                </View>
+
+                {/* Shift Filter */}
+                <View style={styles.ppicHomeCard}>
+                  <Text style={styles.ppicHomeLabel}>Filter by Shift</Text>
+                  <View style={styles.ppicShiftRow}>
+                    <TouchableOpacity
+                      style={[styles.ppicShiftBtn, ppicOverviewShiftId === null && styles.ppicShiftBtnActive]}
+                      onPress={() => { setPpicOverviewShiftId(null); loadPpicOverview(ppicOverviewDate, null); }}
+                    >
+                      <Text style={[styles.ppicShiftBtnText, ppicOverviewShiftId === null && styles.ppicShiftBtnTextActive]}>All</Text>
+                    </TouchableOpacity>
+                    {ppicShifts.map((s) => (
+                      <TouchableOpacity
+                        key={s.id}
+                        style={[styles.ppicShiftBtn, ppicOverviewShiftId === s.id && styles.ppicShiftBtnActive]}
+                        onPress={() => { setPpicOverviewShiftId(s.id); loadPpicOverview(ppicOverviewDate, s.id); }}
+                      >
+                        <Text style={[styles.ppicShiftBtnText, ppicOverviewShiftId === s.id && styles.ppicShiftBtnTextActive]}>{s.name}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+
+                {/* Search */}
+                <View style={[styles.shiftLogsSearchBar, { marginHorizontal: 0, marginBottom: 8 }]}>
+                  <Search size={16} color="#94a3b8" />
+                  <TextInput
+                    style={styles.shiftLogsSearchInput}
+                    placeholder="Search QR, station, sub-line…"
+                    placeholderTextColor="#94a3b8"
+                    value={ppicOverviewSearch}
+                    onChangeText={setPpicOverviewSearch}
+                    returnKeyType="search"
+                  />
+                  {ppicOverviewSearch !== '' && (
+                    <TouchableOpacity onPress={() => setPpicOverviewSearch('')}>
+                      <X size={16} color="#94a3b8" />
+                    </TouchableOpacity>
+                  )}
+                </View>
+
+                {ppicOverviewLoading ? (
+                  <View style={{ alignItems: 'center', paddingVertical: 20 }}>
+                    <ActivityIndicator size="large" color="#17a34a" />
+                    <Text style={{ fontSize: 12, color: '#666', marginTop: 8 }}>Loading station data…</Text>
+                  </View>
+                ) : ppicOverviewData.length === 0 ? (
+                  <View style={[styles.ppicEmptyActive, { marginTop: 4 }]}>
+                    <Text style={styles.ppicEmptyActiveText}>No data found for this date / shift.</Text>
+                  </View>
+                ) : (
+                  <View>
+                  {ppicOverviewData.map((station: any) => {
+                    const isExpanded = ppicExpandedStation === String(station.station_id);
+                    const q = ppicOverviewSearch.trim().toLowerCase();
+                    const filteredLogs = q
+                      ? station.logs.filter((l: any) =>
+                          (l.output_bag_qr || '').toLowerCase().includes(q) ||
+                          (l.sub_line || '').toLowerCase().includes(q) ||
+                          (l.operator_name || '').toLowerCase().includes(q) ||
+                          (l.shift_name || '').toLowerCase().includes(q)
+                        )
+                      : station.logs;
+                    const stationColors: Record<string, { bg: string; accent: string }> = {
+                      label: { bg: '#FDF4FF', accent: '#9333EA' },
+                      crusher: { bg: '#FFF7ED', accent: '#EA580C' },
+                      washing: { bg: '#EFF6FF', accent: '#2563EB' },
+                      extrusion: { bg: '#F0FDF4', accent: '#16A34A' },
+                      packing: { bg: '#F0FDFA', accent: '#0D9488' },
+                    };
+                    const sname = (station.station_name || '').toLowerCase();
+                    const colorKey = sname.includes('label') ? 'label'
+                      : sname.includes('crush') ? 'crusher'
+                      : sname.includes('wash') ? 'washing'
+                      : sname.includes('extru') ? 'extrusion'
+                      : sname.includes('re-pack') || sname.includes('final') ? 'packing'
+                      : 'washing';
+                    const { bg, accent } = stationColors[colorKey] || { bg: '#F8FAFC', accent: '#64748B' };
+                    return (
+                      <View key={station.station_id} style={[styles.shiftLogCategory, { backgroundColor: bg, borderColor: accent + '55', marginBottom: 10 }]}>
+                        <TouchableOpacity
+                          style={styles.shiftLogCategoryHeader}
+                          onPress={() => setPpicExpandedStation(isExpanded ? null : String(station.station_id))}
+                          activeOpacity={0.7}
+                        >
+                          <View style={[styles.shiftLogCatDot, { backgroundColor: accent }]} />
+                          <Text style={[styles.shiftLogCatLabel, { color: accent, flex: 1 }]}>{station.station_name}</Text>
+                          <View style={styles.shiftLogCatBadge}>
+                            <Text style={[styles.shiftLogCatBadgeText, { color: accent }]}>{station.total_bags} bags</Text>
+                          </View>
+                          <Text style={[styles.shiftLogCatWeight, { color: accent }]}>{station.total_weight} kg</Text>
+                          <ChevronRight size={16} color={accent} style={{ marginLeft: 4, transform: [{ rotate: isExpanded ? '90deg' : '0deg' }] }} />
+                        </TouchableOpacity>
+
+                        {isExpanded && (
+                          <View style={{ marginTop: 8 }}>
+                            {filteredLogs.length === 0 ? (
+                              <Text style={{ fontSize: 12, color: '#94a3b8', paddingVertical: 8, textAlign: 'center' }}>No matching entries</Text>
+                            ) : (
+                              filteredLogs.map((log: any, idx: number) => {
+                                const statusColor = log.status === 'pending' ? '#f59e0b' : log.status === 'Cancelled' ? '#ef4444' : '#22c55e';
+                                return (
+                                  <View key={log.id} style={[styles.shiftLogRow, idx === 0 && { borderTopWidth: 1, borderTopColor: accent + '30' }]}>
+                                    <View style={{ flex: 1, minWidth: 0 }}>
+                                      <Text style={styles.shiftLogQr} numberOfLines={1}>{log.output_bag_qr || '—'}</Text>
+                                      <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
+                                        {log.sub_line ? <Text style={[styles.shiftLogMeta, { color: accent }]}>{log.sub_line}</Text> : null}
+                                        <View style={[styles.shiftLogStatusDot, { backgroundColor: statusColor }]} />
+                                        <Text style={[styles.shiftLogMeta, { color: statusColor }]}>{log.status}</Text>
+                                        {log.shift_name ? <Text style={[styles.shiftLogMeta, { color: '#94a3b8' }]}>· {log.shift_name}</Text> : null}
+                                        {log.operator_name ? <Text style={[styles.shiftLogMeta, { color: '#94a3b8' }]}>· {log.operator_name}</Text> : null}
+                                      </View>
+                                    </View>
+                                    <Text style={styles.shiftLogWeight}>{Number(log.weight) || 0} kg</Text>
+                                    <TouchableOpacity
+                                      onPress={() => { setSelectedLogForPrint(log); setShowListPrintPreview(true); }}
+                                      style={styles.shiftLogPrintBtn}
+                                    >
+                                      <PrinterIcon color="#475569" size={14} />
+                                    </TouchableOpacity>
+                                    <TouchableOpacity onPress={() => openEditLogWeight(log)} style={styles.shiftLogEditBtn}>
+                                      <Pencil color="#0ea5e9" size={14} />
+                                      <Text style={styles.shiftLogEditText}>Edit</Text>
+                                    </TouchableOpacity>
+                                  </View>
+                                );
+                              })
+                            )}
+                          </View>
+                        )}
+                      </View>
+                    );
+                  })}
+                  </View>
+                )}
               </View>
             ) : (
               <View style={{ width: '100%' }}>
+            {/* Shift Ended — shown after shift is closed, hide start button */}
+            {shiftEndedAt ? (
+              <View style={{ alignItems: 'center', padding: 24 }}>
+                <View style={{ width: 64, height: 64, borderRadius: 32, backgroundColor: '#FEF2F2', alignItems: 'center', justifyContent: 'center', marginBottom: 16 }}>
+                  <Square color="#EF4444" size={28} fill="#EF4444" />
+                </View>
+                <Text style={{ fontSize: 20, fontWeight: '700', color: '#DC2626', marginBottom: 6 }}>Shift Ended</Text>
+                <Text style={{ fontSize: 14, color: '#7f1d1d', textAlign: 'center', marginBottom: 8 }}>
+                  Ended at {new Date(shiftEndedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · {shiftDuration}
+                </Text>
+                <Text style={{ fontSize: 13, color: '#9ca3af', textAlign: 'center' }}>This shift has been closed. Contact PPIC to start a new shift.</Text>
+              </View>
+            ) : (
+              <>
             <TouchableOpacity style={styles.startShiftCard} onPress={handleStartShift}>
               <View style={styles.playIconCircle}><Play fill="#FFF" color="#FFF" size={24} /></View>
               <View style={styles.startShiftText}><Text style={styles.startShiftTitle}>{t('dashboard.startShift')}</Text><Text style={styles.startShiftSubtitle}>{t('dashboard.tapToBegin')}</Text></View>
@@ -2200,23 +2708,40 @@ const DashboardScreen = ({ navigation }: any) => {
                 </TouchableOpacity>
               </View>
             )}
+              </>
+            )}
               </View>
             )}
           </View>
         ) : !selectedStation ? (
           <View style={styles.dashboardGrid}>
             <View style={styles.statusRow}>
-              <View style={styles.activeStatus}><View style={styles.statusDot} /><Text style={styles.statusText}>{t('dashboard.shiftActive')}</Text></View>
-                <Text style={styles.durationText}>{shiftDuration}</Text>
-              </View>
+              {shiftEndedAt ? (
+                <>
+                  <View style={[styles.activeStatus, { backgroundColor: '#FEF2F2' }]}>
+                    <View style={[styles.statusDot, { backgroundColor: '#EF4444' }]} />
+                    <Text style={[styles.statusText, { color: '#DC2626' }]}>Shift Closed</Text>
+                  </View>
+                  <Text style={[styles.durationText, { color: '#DC2626' }]}>
+                    Ended {new Date(shiftEndedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · {shiftDuration}
+                  </Text>
+                </>
+              ) : (
+                <>
+                  <View style={styles.activeStatus}><View style={styles.statusDot} /><Text style={styles.statusText}>{t('dashboard.shiftActive')}</Text></View>
+                  <Text style={styles.durationText}>{shiftDuration}</Text>
+                </>
+              )}
+            </View>
             <View style={styles.statsRow}>
               <View style={styles.statCard}>
                 <Text style={styles.statValue}>
                   {(() => {
-                    const extrusionStation = stations.find(s => s.name?.toLowerCase().includes('extrusion') || s.id === 4);
+                    const extrusionStation = stations.find(s =>
+                      s.name?.toLowerCase().includes('extrusion')
+                    );
                     if (!extrusionStation) return 0;
-                    const extrusionLogs = shiftLogs.filter((l: any) => l.station_id === extrusionStation.id);
-                    return extrusionLogs.length;
+                    return shiftLogs.filter((l: any) => l.station_id === extrusionStation.id).length;
                   })()}
                 </Text>
                 <Text style={styles.statLabel}>Outputs</Text>
@@ -2224,10 +2749,14 @@ const DashboardScreen = ({ navigation }: any) => {
               <View style={styles.statCard}>
                 <Text style={styles.statValue}>
                   {(() => {
-                    const extrusionStation = stations.find(s => s.name?.toLowerCase().includes('extrusion') || s.id === 4);
+                    const extrusionStation = stations.find(s =>
+                      s.name?.toLowerCase().includes('extrusion')
+                    );
                     if (!extrusionStation) return '0.0';
-                    const extrusionLogs = shiftLogs.filter((l: any) => l.station_id === extrusionStation.id);
-                    return extrusionLogs.reduce((acc: number, l: any) => acc + Number(l.weight || 0), 0).toFixed(1);
+                    return shiftLogs
+                      .filter((l: any) => l.station_id === extrusionStation.id)
+                      .reduce((acc: number, l: any) => acc + Number(l.weight || 0), 0)
+                      .toFixed(1);
                   })()}
                 </Text>
                 <Text style={styles.statLabel}>Total kg</Text>
@@ -2238,11 +2767,18 @@ const DashboardScreen = ({ navigation }: any) => {
               <TouchableOpacity key={s.id} style={styles.stationCard} onPress={() => handleStationSelect(s)}>
                 <View style={[styles.stationIconBox, { backgroundColor: s.color }]}>{renderStationIcon(s.name, s.color)}</View>
                 <View style={styles.stationInfo}><Text style={styles.stationName}>{(s as any).displayName || s.name}</Text><Text style={styles.stationDesc} numberOfLines={1}>{s.description}</Text></View>
-                <View style={styles.stationMiniStats}><Text style={styles.miniStat}>{shiftLogs.filter(l => l.station_id === s.id).length} bags</Text></View>
+                <View style={styles.stationMiniStats}>
+                  <Text style={styles.miniStat}>{shiftLogs.filter(l => l.station_id === s.id).length} bags</Text>
+                  <Text style={{ fontSize: 11, color: '#64748b', textAlign: 'right' }}>
+                    {shiftLogs.filter(l => l.station_id === s.id).reduce((sum, l: any) => sum + (parseFloat(l.weight) || 0), 0).toFixed(1)} kg
+                  </Text>
+                </View>
                 <ChevronRight color="#CCC" size={20} />
               </TouchableOpacity>
             ))}
-            <TouchableOpacity style={styles.endShiftButton} onPress={handleEndShift}><Square color="#FFF" size={20} /><Text style={styles.endShiftText}>{t('dashboard.closeShift')}</Text></TouchableOpacity>
+            {isShiftActive && !shiftEndedAt && (
+              <TouchableOpacity style={styles.endShiftButton} onPress={handleEndShift}><Square color="#FFF" size={20} /><Text style={styles.endShiftText}>{t('dashboard.closeShift')}</Text></TouchableOpacity>
+            )}
           </View>
         ) : (
           <View style={styles.detailContainer}>
@@ -2382,6 +2918,13 @@ const DashboardScreen = ({ navigation }: any) => {
                         </View>
 
                         {/* Output: weight + QR */}
+                        {isShiftEnded ? (
+                          <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#FEF2F2', borderRadius: 10, padding: 12, marginBottom: 8, borderWidth: 1, borderColor: '#FECACA' }}>
+                            <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#EF4444', marginRight: 8 }} />
+                            <Text style={{ fontSize: 13, fontWeight: '700', color: '#DC2626' }}>Shift Ended — View Only</Text>
+                            <Text style={{ fontSize: 12, color: '#7f1d1d', marginLeft: 6 }}>New output is disabled.</Text>
+                          </View>
+                        ) : (
                         <View style={styles.sectionCard}>
                           <View style={styles.sectionHeaderRow}>
                             <View style={[styles.typePill, { backgroundColor: '#DCFCE7' }]}>
@@ -2431,6 +2974,7 @@ const DashboardScreen = ({ navigation }: any) => {
                             <Text style={[styles.primaryButtonText, !weightInput && { color: '#94A3B8' }]}>Generate QR & Print</Text>
                           </TouchableOpacity>
                         </View>
+                        )}
 
                         {/* Shift progress */}
                         <View style={styles.progressCardRedesign}>
@@ -2459,30 +3003,110 @@ const DashboardScreen = ({ navigation }: any) => {
                 !selectedSubLine ? (
                   <View style={styles.selectionContainer}>
                     <Text style={styles.selectionTitle}>Select Crusher Line</Text>
-                    <TouchableOpacity style={styles.selectionCard} onPress={() => setSelectedSubLine('3E')}>
+                    <TouchableOpacity style={[styles.selectionCard, isShiftEnded && { opacity: 0.4 }]} disabled={isShiftEnded} onPress={() => setSelectedSubLine('3E')}>
                       <View style={[styles.selectionIconBox, { backgroundColor: '#3b82f6' }]}><Package color="#FFF" size={28} /></View>
                       <View style={styles.selectionText}>
                         <Text style={styles.selectionCardTitle}>3E</Text>
                         <Text style={styles.selectionCardSub}>{t('dashboard.primaryCrusherLine')}</Text>
-                    </View>
+                      </View>
+                      <View style={{ alignItems: 'flex-end', marginRight: 8 }}>
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: '#1e293b' }}>
+                          {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === '3E').length} bags
+                        </Text>
+                        <Text style={{ fontSize: 11, color: '#64748b' }}>
+                          {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === '3E').reduce((s: number, l: any) => s + (parseFloat(l.weight) || 0), 0).toFixed(1)} kg
+                        </Text>
+                      </View>
                       <ChevronRight color="#CCC" size={24} />
                     </TouchableOpacity>
-                    <TouchableOpacity style={styles.selectionCard} onPress={() => setSelectedSubLine('Rapid')}>
+                    <TouchableOpacity style={[styles.selectionCard, isShiftEnded && { opacity: 0.4 }]} disabled={isShiftEnded} onPress={() => setSelectedSubLine('Rapid')}>
                       <View style={[styles.selectionIconBox, { backgroundColor: '#a855f7' }]}><Zap color="#FFF" size={28} /></View>
                       <View style={styles.selectionText}>
                         <Text style={styles.selectionCardTitle}>Rapid</Text>
                         <Text style={styles.selectionCardSub}>{t('dashboard.fastProcessingLine')}</Text>
-                  </View>
+                      </View>
+                      <View style={{ alignItems: 'flex-end', marginRight: 8 }}>
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: '#1e293b' }}>
+                          {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === 'Rapid').length} bags
+                        </Text>
+                        <Text style={{ fontSize: 11, color: '#64748b' }}>
+                          {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === 'Rapid').reduce((s: number, l: any) => s + (parseFloat(l.weight) || 0), 0).toFixed(1)} kg
+                        </Text>
+                      </View>
                       <ChevronRight color="#CCC" size={24} />
                     </TouchableOpacity>
-                    <TouchableOpacity style={styles.selectionCard} onPress={() => setSelectedSubLine('Betty')}>
+                    <TouchableOpacity style={[styles.selectionCard, isShiftEnded && { opacity: 0.4 }]} disabled={isShiftEnded} onPress={() => setSelectedSubLine('Betty')}>
                       <View style={[styles.selectionIconBox, { backgroundColor: '#10b981' }]}><Box color="#FFF" size={28} /></View>
                       <View style={styles.selectionText}>
                         <Text style={styles.selectionCardTitle}>Betty</Text>
                         <Text style={styles.selectionCardSub}>{t('dashboard.bettyMachineLine')}</Text>
-                  </View>
+                      </View>
+                      <View style={{ alignItems: 'flex-end', marginRight: 8 }}>
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: '#1e293b' }}>
+                          {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === 'Betty').length} bags
+                        </Text>
+                        <Text style={{ fontSize: 11, color: '#64748b' }}>
+                          {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === 'Betty').reduce((s: number, l: any) => s + (parseFloat(l.weight) || 0), 0).toFixed(1)} kg
+                        </Text>
+                      </View>
                       <ChevronRight color="#CCC" size={24} />
                     </TouchableOpacity>
+
+                    {/* Shift Ended banner for Crusher */}
+                    {isShiftEnded && (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#FEF2F2', borderRadius: 10, padding: 12, marginTop: 4, marginBottom: 4, borderWidth: 1, borderColor: '#FECACA' }}>
+                        <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#EF4444', marginRight: 8 }} />
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: '#DC2626' }}>Shift Ended — View Only</Text>
+                        <Text style={{ fontSize: 12, color: '#7f1d1d', marginLeft: 6 }}>New input/output is disabled.</Text>
+                      </View>
+                    )}
+
+                    {/* Crusher Station Totals */}
+                    {(() => {
+                      const lines = [
+                        { label: '3E',    color: '#3b82f6', icon: '⚙' },
+                        { label: 'Rapid', color: '#a855f7', icon: '⚡' },
+                        { label: 'Betty', color: '#10b981', icon: '📦' },
+                      ];
+                      const totalBags = shiftLogs.filter((l: any) => l.station_id === selectedStation.id).length;
+                      const totalKg   = shiftLogs.filter((l: any) => l.station_id === selectedStation.id).reduce((s: number, l: any) => s + (parseFloat(l.weight) || 0), 0);
+                      return (
+                        <View style={{ marginBottom: 12 }}>
+                          {/* Station-wide summary bar */}
+                          <View style={{ backgroundColor: '#1e293b', borderRadius: 14, padding: 14, marginBottom: 10, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <Text style={{ fontSize: 13, fontWeight: '700', color: '#94a3b8' }}>Crusher — This Shift</Text>
+                            <View style={{ flexDirection: 'row', gap: 16 }}>
+                              <View style={{ alignItems: 'center' }}>
+                                <Text style={{ fontSize: 20, fontWeight: '800', color: '#fff' }}>{totalBags}</Text>
+                                <Text style={{ fontSize: 10, color: '#94a3b8', marginTop: 1 }}>bags</Text>
+                              </View>
+                              <View style={{ width: 1, backgroundColor: '#334155' }} />
+                              <View style={{ alignItems: 'center' }}>
+                                <Text style={{ fontSize: 20, fontWeight: '800', color: '#fff' }}>{totalKg.toFixed(1)}</Text>
+                                <Text style={{ fontSize: 10, color: '#94a3b8', marginTop: 1 }}>kg</Text>
+                              </View>
+                            </View>
+                          </View>
+                          {/* Per-line breakdown */}
+                          <View style={{ flexDirection: 'row', gap: 8 }}>
+                            {lines.map(({ label, color }) => {
+                              const bags = shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === label).length;
+                              const kg   = shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === label).reduce((s: number, l: any) => s + (parseFloat(l.weight) || 0), 0);
+                              return (
+                                <View key={label} style={{ flex: 1, backgroundColor: '#fff', borderRadius: 12, padding: 12, borderTopWidth: 3, borderTopColor: color, elevation: 2, shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 4, shadowOffset: { width: 0, height: 2 } }}>
+                                  <Text style={{ fontSize: 12, fontWeight: '700', color, marginBottom: 6 }}>{label}</Text>
+                                  <Text style={{ fontSize: 22, fontWeight: '800', color: '#1e293b' }}>{bags}</Text>
+                                  <Text style={{ fontSize: 11, color: '#64748b', marginTop: 1 }}>bags</Text>
+                                  <View style={{ marginTop: 6, borderTopWidth: 1, borderTopColor: '#f1f5f9', paddingTop: 6 }}>
+                                    <Text style={{ fontSize: 13, fontWeight: '700', color: '#475569' }}>{kg.toFixed(1)} kg</Text>
+                                  </View>
+                                </View>
+                              );
+                            })}
+                          </View>
+                        </View>
+                      );
+                    })()}
 
                     {/* Logs List Section */}
                     <View style={styles.crusherLogsSection}>
@@ -2610,7 +3234,7 @@ const DashboardScreen = ({ navigation }: any) => {
                   </View>
                 </View>
                               <View style={styles.logActions}>
-                                {user?.role?.toLowerCase() === 'ppic' && (
+                                {(user?.role?.toLowerCase() === 'ppic' || log.status === 'pending') && (
                                   <TouchableOpacity
                                     style={styles.editIconButton}
                                     onPress={() => openEditLogWeight(log)}
@@ -2627,7 +3251,7 @@ const DashboardScreen = ({ navigation }: any) => {
                                 >
                                   <PrinterIcon color="#17a34a" size={20} />
                                 </TouchableOpacity>
-                                <View style={[styles.logBadge, { 
+                                <View style={[styles.logBadge, {
                                   backgroundColor: log.sub_line === '3E' ? '#EBF5FF' : log.sub_line === 'Rapid' ? '#F5F3FF' : '#D1FAE5',
                                 }]}>
                                   <Text style={[styles.logBadgeText, { 
@@ -2648,21 +3272,24 @@ const DashboardScreen = ({ navigation }: any) => {
                       {/* Pagination */}
                       {totalPages > 1 && (
                         <View style={styles.pagination}>
-                      <TouchableOpacity 
+                          <TouchableOpacity
                             style={[styles.pageBtn, currentPage === 1 && styles.pageBtnDisabled]}
                             onPress={() => setCurrentPage(Math.max(1, currentPage - 1))}
                             disabled={currentPage === 1}
                           >
-                            <ChevronRight color={currentPage === 1 ? "#CCC" : "#475569"} size={20} style={{ transform: [{ rotate: '180deg' }] }} />
-                      </TouchableOpacity>
-                          <Text style={styles.pageInfo}>Page {currentPage} of {totalPages} ({totalLogs} total)</Text>
-                      <TouchableOpacity 
+                            <ChevronLeft color={currentPage === 1 ? '#cbd5e1' : '#475569'} size={18} />
+                          </TouchableOpacity>
+                          <View style={styles.pageInfoBox}>
+                            <Text style={styles.pageInfoMain}>{currentPage} / {totalPages}</Text>
+                            <Text style={styles.pageInfoSub}>{totalLogs} total</Text>
+                          </View>
+                          <TouchableOpacity
                             style={[styles.pageBtn, currentPage === totalPages && styles.pageBtnDisabled]}
                             onPress={() => setCurrentPage(Math.min(totalPages, currentPage + 1))}
                             disabled={currentPage === totalPages}
                           >
-                            <ChevronRight color={currentPage === totalPages ? "#CCC" : "#475569"} size={20} />
-                      </TouchableOpacity>
+                            <ChevronRight color={currentPage === totalPages ? '#cbd5e1' : '#475569'} size={18} />
+                          </TouchableOpacity>
                         </View>
                       )}
                     </View>
@@ -2677,7 +3304,13 @@ const DashboardScreen = ({ navigation }: any) => {
                     </View>
 
                     {/* Section picker — shown before choosing Input or Output */}
-                    {!selectedSection ? (
+                    {isShiftEnded ? (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#FEF2F2', borderRadius: 10, padding: 12, marginBottom: 16, borderWidth: 1, borderColor: '#FECACA' }}>
+                        <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#EF4444', marginRight: 8 }} />
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: '#DC2626' }}>Shift Ended — View Only</Text>
+                        <Text style={{ fontSize: 12, color: '#7f1d1d', marginLeft: 6 }}>New input/output is disabled.</Text>
+                      </View>
+                    ) : !selectedSection ? (
                       <View style={styles.sectionOptions}>
                         <TouchableOpacity
                           style={styles.sectionOption}
@@ -2727,18 +3360,21 @@ const DashboardScreen = ({ navigation }: any) => {
                             />
                           </View>
                           {showSuggestions && (
-                            <View style={styles.suggestionsList}>
+                            <ScrollView style={styles.suggestionsList} keyboardShouldPersistTaps="handled" nestedScrollEnabled>
                               {suggestedBags.map((bag, i) => (
                                 <TouchableOpacity
                                   key={i}
-                                  style={styles.suggestionItem}
+                                  style={[styles.suggestionItem, i === suggestedBags.length - 1 && { borderBottomWidth: 0 }]}
                                   onPress={() => { setSelectedInputBag(bag); setShowSuggestions(false); setBagSearchQuery(''); }}
                                 >
-                                  <Text style={styles.suggestionId}>{bag.output_bag_qr}</Text>
-                                  <Text style={styles.suggestionDetail}>{bag.sub_line} — {bag.weight} kg</Text>
+                                  <View style={{ flex: 1 }}>
+                                    <Text style={styles.suggestionId}>{bag.output_bag_qr}</Text>
+                                    {bag.sub_line ? <Text style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>{bag.sub_line}</Text> : null}
+                                  </View>
+                                  <Text style={styles.suggestionDetail}>{bag.weight} kg</Text>
                                 </TouchableOpacity>
                               ))}
-                            </View>
+                            </ScrollView>
                           )}
                         </View>
 
@@ -2804,6 +3440,13 @@ const DashboardScreen = ({ navigation }: any) => {
                     ) : (
                       /* ── Betty OUTPUT: same form as 3E / Rapid ── */
                       <>
+                        {isShiftEnded ? (
+                          <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#FEF2F2', borderRadius: 10, padding: 12, marginBottom: 8, borderWidth: 1, borderColor: '#FECACA' }}>
+                            <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#EF4444', marginRight: 8 }} />
+                            <Text style={{ fontSize: 13, fontWeight: '700', color: '#DC2626' }}>Shift Ended — View Only</Text>
+                            <Text style={{ fontSize: 12, color: '#7f1d1d', marginLeft: 6 }}>New output is disabled.</Text>
+                          </View>
+                        ) : (
                         <View style={styles.sectionCard}>
                           <View style={styles.sectionHeaderRow}>
                             <View style={[styles.typePill, { backgroundColor: '#DCFCE7' }]}>
@@ -2860,6 +3503,7 @@ const DashboardScreen = ({ navigation }: any) => {
                             <Text style={styles.secondaryButtonText}>← Back</Text>
                           </TouchableOpacity>
                         </View>
+                        )}
 
                         <View style={styles.progressCardRedesign}>
                           <Text style={styles.progressTitleRedesign}>Shift Progress (Betty)</Text>
@@ -2903,6 +3547,13 @@ const DashboardScreen = ({ navigation }: any) => {
                 </View>
 
                     {/* Output Section */}
+                {isShiftEnded ? (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#FEF2F2', borderRadius: 10, padding: 12, marginBottom: 8, borderWidth: 1, borderColor: '#FECACA' }}>
+                    <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#EF4444', marginRight: 8 }} />
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: '#DC2626' }}>Shift Ended — View Only</Text>
+                    <Text style={{ fontSize: 12, color: '#7f1d1d', marginLeft: 6 }}>New output is disabled.</Text>
+                  </View>
+                ) : (
                 <View style={styles.sectionCard}>
                   <View style={styles.sectionHeaderRow}>
                     <View style={[styles.typePill, { backgroundColor: '#DCFCE7' }]}>
@@ -2969,6 +3620,7 @@ const DashboardScreen = ({ navigation }: any) => {
                         <Text style={[styles.primaryButtonText, !weightInput && { color: '#94A3B8' }]}>Generate QR & Print</Text>
                   </TouchableOpacity>
                 </View>
+                )}
 
                 {/* Shift Progress Section */}
                     <View style={styles.progressCardRedesign}>
@@ -2993,37 +3645,112 @@ const DashboardScreen = ({ navigation }: any) => {
                   <React.Fragment>
                     <View style={styles.selectionContainer}>
                       <Text style={styles.selectionTitle}>Select Washing Line</Text>
-                      <TouchableOpacity style={styles.selectionCard} onPress={() => { setPendingWashingLine('Washing 1'); setShowWashingModal(true); }}>
+                      <TouchableOpacity style={[styles.selectionCard, isShiftEnded && { opacity: 0.4 }]} disabled={isShiftEnded} onPress={() => { setPendingWashingLine('Washing 1'); setShowWashingModal(true); }}>
                         <View style={[styles.selectionIconBox, { backgroundColor: '#06b6d4' }]}><Droplets color="#FFF" size={28} /></View>
                         <View style={styles.selectionText}>
                           <Text style={styles.selectionCardTitle}>Washing 1</Text>
                           <Text style={styles.selectionCardSub}>Primary Washing Line</Text>
                         </View>
+                        <View style={{ alignItems: 'flex-end', marginRight: 8 }}>
+                          <Text style={{ fontSize: 13, fontWeight: '700', color: '#1e293b' }}>
+                            {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === 'Washing 1').length} bags
+                          </Text>
+                          <Text style={{ fontSize: 11, color: '#64748b' }}>
+                            {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === 'Washing 1').reduce((s: number, l: any) => s + (parseFloat(l.weight) || 0), 0).toFixed(1)} kg
+                          </Text>
+                        </View>
                         <ChevronRight color="#CCC" size={24} />
                       </TouchableOpacity>
-                      <TouchableOpacity style={styles.selectionCard} onPress={() => { setPendingWashingLine('Washing 2'); setShowWashingModal(true); }}>
+                      <TouchableOpacity style={[styles.selectionCard, isShiftEnded && { opacity: 0.4 }]} disabled={isShiftEnded} onPress={() => { setPendingWashingLine('Washing 2'); setShowWashingModal(true); }}>
                         <View style={[styles.selectionIconBox, { backgroundColor: '#0891b2' }]}><Droplets color="#FFF" size={28} /></View>
                         <View style={styles.selectionText}>
                           <Text style={styles.selectionCardTitle}>Washing 2</Text>
                           <Text style={styles.selectionCardSub}>Secondary Washing Line</Text>
                         </View>
+                        <View style={{ alignItems: 'flex-end', marginRight: 8 }}>
+                          <Text style={{ fontSize: 13, fontWeight: '700', color: '#1e293b' }}>
+                            {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === 'Washing 2').length} bags
+                          </Text>
+                          <Text style={{ fontSize: 11, color: '#64748b' }}>
+                            {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === 'Washing 2').reduce((s: number, l: any) => s + (parseFloat(l.weight) || 0), 0).toFixed(1)} kg
+                          </Text>
+                        </View>
                         <ChevronRight color="#CCC" size={24} />
                       </TouchableOpacity>
-                      <TouchableOpacity style={styles.selectionCard} onPress={() => { setPendingWashingLine('Washing 3'); setShowWashingModal(true); }}>
+                      <TouchableOpacity style={[styles.selectionCard, isShiftEnded && { opacity: 0.4 }]} disabled={isShiftEnded} onPress={() => { setPendingWashingLine('Washing 3'); setShowWashingModal(true); }}>
                         <View style={[styles.selectionIconBox, { backgroundColor: '#0e7490' }]}><Droplets color="#FFF" size={28} /></View>
                         <View style={styles.selectionText}>
                           <Text style={styles.selectionCardTitle}>Washing 3</Text>
                           <Text style={styles.selectionCardSub}>Tertiary Washing Line</Text>
+                        </View>
+                        <View style={{ alignItems: 'flex-end', marginRight: 8 }}>
+                          <Text style={{ fontSize: 13, fontWeight: '700', color: '#1e293b' }}>
+                            {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === 'Washing 3').length} bags
+                          </Text>
+                          <Text style={{ fontSize: 11, color: '#64748b' }}>
+                            {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === 'Washing 3').reduce((s: number, l: any) => s + (parseFloat(l.weight) || 0), 0).toFixed(1)} kg
+                          </Text>
                         </View>
                         <ChevronRight color="#CCC" size={24} />
                       </TouchableOpacity>
                     </View>
 
                     {/* Logs List Section */}
+                    {isShiftEnded && (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#FEF2F2', borderRadius: 10, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: '#FECACA' }}>
+                        <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#EF4444', marginRight: 8 }} />
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: '#DC2626' }}>Shift Ended — View Only</Text>
+                        <Text style={{ fontSize: 12, color: '#7f1d1d', marginLeft: 6 }}>New input/output is disabled.</Text>
+                      </View>
+                    )}
+                    {/* Washing Station Totals */}
+                    {(() => {
+                      const lines = [
+                        { label: 'Washing 1', short: 'Line 1', color: '#06b6d4' },
+                        { label: 'Washing 2', short: 'Line 2', color: '#0891b2' },
+                        { label: 'Washing 3', short: 'Line 3', color: '#0e7490' },
+                      ];
+                      const totalBags = shiftLogs.filter((l: any) => l.station_id === selectedStation.id).length;
+                      const totalKg   = shiftLogs.filter((l: any) => l.station_id === selectedStation.id).reduce((s: number, l: any) => s + (parseFloat(l.weight) || 0), 0);
+                      return (
+                        <View style={{ marginBottom: 12 }}>
+                          <View style={{ backgroundColor: '#1e293b', borderRadius: 14, padding: 14, marginBottom: 10, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <Text style={{ fontSize: 13, fontWeight: '700', color: '#94a3b8' }}>Washing — This Shift</Text>
+                            <View style={{ flexDirection: 'row', gap: 16 }}>
+                              <View style={{ alignItems: 'center' }}>
+                                <Text style={{ fontSize: 20, fontWeight: '800', color: '#fff' }}>{totalBags}</Text>
+                                <Text style={{ fontSize: 10, color: '#94a3b8', marginTop: 1 }}>bags</Text>
+                              </View>
+                              <View style={{ width: 1, backgroundColor: '#334155' }} />
+                              <View style={{ alignItems: 'center' }}>
+                                <Text style={{ fontSize: 20, fontWeight: '800', color: '#fff' }}>{totalKg.toFixed(1)}</Text>
+                                <Text style={{ fontSize: 10, color: '#94a3b8', marginTop: 1 }}>kg</Text>
+                              </View>
+                            </View>
+                          </View>
+                          <View style={{ flexDirection: 'row', gap: 8 }}>
+                            {lines.map(({ label, short, color }) => {
+                              const bags = shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === label).length;
+                              const kg   = shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === label).reduce((s: number, l: any) => s + (parseFloat(l.weight) || 0), 0);
+                              return (
+                                <View key={label} style={{ flex: 1, backgroundColor: '#fff', borderRadius: 12, padding: 12, borderTopWidth: 3, borderTopColor: color, elevation: 2, shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 4, shadowOffset: { width: 0, height: 2 } }}>
+                                  <Text style={{ fontSize: 12, fontWeight: '700', color, marginBottom: 6 }}>{short}</Text>
+                                  <Text style={{ fontSize: 22, fontWeight: '800', color: '#1e293b' }}>{bags}</Text>
+                                  <Text style={{ fontSize: 11, color: '#64748b', marginTop: 1 }}>bags</Text>
+                                  <View style={{ marginTop: 6, borderTopWidth: 1, borderTopColor: '#f1f5f9', paddingTop: 6 }}>
+                                    <Text style={{ fontSize: 13, fontWeight: '700', color: '#475569' }}>{kg.toFixed(1)} kg</Text>
+                                  </View>
+                                </View>
+                              );
+                            })}
+                          </View>
+                        </View>
+                      );
+                    })()}
                     <View style={[styles.crusherLogsSection, { marginTop: 8 }]}>
-                    <View style={styles.logsHeader}>
-                      <Text style={styles.logsTitle}>Recent Entries</Text>
-                    </View>
+                      <View style={styles.logsHeader}>
+                        <Text style={styles.logsTitle}>Recent Entries</Text>
+                      </View>
 
                     {/* Date Picker */}
                     <View style={styles.datePickerContainer}>
@@ -3145,7 +3872,7 @@ const DashboardScreen = ({ navigation }: any) => {
                               </View>
                             </View>
                             <View style={styles.logActions}>
-                              {user?.role?.toLowerCase() === 'ppic' && (
+                              {(user?.role?.toLowerCase() === 'ppic' || log.status === 'pending') && (
                                 <TouchableOpacity
                                   style={styles.editIconButton}
                                   onPress={() => openEditLogWeight(log)}
@@ -3184,20 +3911,23 @@ const DashboardScreen = ({ navigation }: any) => {
                     {/* Pagination */}
                     {washingTotalPages > 1 && (
                       <View style={styles.pagination}>
-                        <TouchableOpacity 
+                        <TouchableOpacity
                           style={[styles.pageBtn, washingCurrentPage === 1 && styles.pageBtnDisabled]}
                           onPress={() => washingCurrentPage > 1 && setWashingCurrentPage(washingCurrentPage - 1)}
                           disabled={washingCurrentPage === 1}
                         >
-                          <ChevronLeft size={20} color={washingCurrentPage === 1 ? "#94a3b8" : "#17a34a"} />
+                          <ChevronLeft size={18} color={washingCurrentPage === 1 ? '#cbd5e1' : '#475569'} />
                         </TouchableOpacity>
-                        <Text style={styles.pageInfo}>{washingCurrentPage} / {washingTotalPages}</Text>
-                        <TouchableOpacity 
+                        <View style={styles.pageInfoBox}>
+                          <Text style={styles.pageInfoMain}>{washingCurrentPage} / {washingTotalPages}</Text>
+                          <Text style={styles.pageInfoSub}>{washingTotalLogs} total</Text>
+                        </View>
+                        <TouchableOpacity
                           style={[styles.pageBtn, washingCurrentPage === washingTotalPages && styles.pageBtnDisabled]}
                           onPress={() => washingCurrentPage < washingTotalPages && setWashingCurrentPage(washingCurrentPage + 1)}
                           disabled={washingCurrentPage === washingTotalPages}
                         >
-                          <ChevronRight size={20} color={washingCurrentPage === washingTotalPages ? "#94a3b8" : "#17a34a"} />
+                          <ChevronRight size={18} color={washingCurrentPage === washingTotalPages ? '#cbd5e1' : '#475569'} />
                         </TouchableOpacity>
                       </View>
                     )}
@@ -3231,22 +3961,25 @@ const DashboardScreen = ({ navigation }: any) => {
                           />
                         </View>
                         {showSuggestions && (
-                          <View style={styles.suggestionsList}>
+                          <ScrollView style={styles.suggestionsList} keyboardShouldPersistTaps="handled" nestedScrollEnabled>
                             {suggestedBags.map((bag, i) => (
-                              <TouchableOpacity 
-                                key={i} 
-                                style={styles.suggestionItem}
+                              <TouchableOpacity
+                                key={i}
+                                style={[styles.suggestionItem, i === suggestedBags.length - 1 && { borderBottomWidth: 0 }]}
                                 onPress={() => {
                                   setSelectedInputBag(bag);
                                   setShowSuggestions(false);
                                   setBagSearchQuery('');
                                 }}
                               >
-                                <Text style={styles.suggestionId}>{bag.output_bag_qr}</Text>
+                                <View style={{ flex: 1 }}>
+                                  <Text style={styles.suggestionId}>{bag.output_bag_qr}</Text>
+                                  {bag.sub_line ? <Text style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>{bag.sub_line}</Text> : null}
+                                </View>
                                 <Text style={styles.suggestionDetail}>{bag.weight} kg</Text>
                               </TouchableOpacity>
                             ))}
-                          </View>
+                          </ScrollView>
                         )}
                       </View>
                       <TouchableOpacity style={styles.scanButton} onPress={() => { setScanned(false); setShowScanner(true); }}>
@@ -3433,7 +4166,7 @@ const DashboardScreen = ({ navigation }: any) => {
               </React.Fragment>
                 ) : null}
           </View>
-            ) : selectedStation.name === 'Extrusion' ? (
+            ) : selectedStation.name === 'Extrusion & Packaging' ? (
               <View style={styles.crusherContainer}>
                 {/* ══════════════════════════════════════════════════════════
                     PE EXTRUDER FLOW
@@ -3467,7 +4200,8 @@ const DashboardScreen = ({ navigation }: any) => {
                           { line: 'Pellet EVA SUPER', primary: 'Flakes EVA SUPER', color: '#9333ea', sellable: true  },
                           { line: 'Pellet EVA 1',     primary: 'Flakes EVA 1',     color: '#7c3aed', sellable: false },
                         ] as const).map(({ line, primary, color, sellable }) => (
-                          <TouchableOpacity key={line} style={styles.selectionCard}
+                          <TouchableOpacity key={line} style={[styles.selectionCard, isShiftEnded && { opacity: 0.4 }]}
+                            disabled={isShiftEnded}
                             onPress={() => { setSelectedSubLine(line as any); setSelectedSection(null); }}>
                             <View style={[styles.selectionIconBox, { backgroundColor: color }]}>
                               <Zap color="#FFF" size={28} />
@@ -3482,6 +4216,14 @@ const DashboardScreen = ({ navigation }: any) => {
                                 )}
                               </View>
                               <Text style={styles.selectionCardSub}>Primary input: {primary}</Text>
+                            </View>
+                            <View style={{ alignItems: 'flex-end', marginRight: 8 }}>
+                              <Text style={{ fontSize: 13, fontWeight: '700', color: '#1e293b' }}>
+                                {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === line).length} bags
+                              </Text>
+                              <Text style={{ fontSize: 11, color: '#64748b' }}>
+                                {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === line).reduce((s: number, l: any) => s + (parseFloat(l.weight) || 0), 0).toFixed(1)} kg
+                              </Text>
                             </View>
                             <ChevronRight color="#CCC" size={24} />
                           </TouchableOpacity>
@@ -3570,20 +4312,25 @@ const DashboardScreen = ({ navigation }: any) => {
                                 </TouchableOpacity>
                               </View>
                               {showSuggestions && suggestedBags.length > 0 && (
-                                <View style={styles.suggestionsContainer}>
+                                <ScrollView style={styles.suggestionsContainer} keyboardShouldPersistTaps="handled" nestedScrollEnabled>
                                   {suggestedBags.map((bag: any, idx: number) => (
-                                    <TouchableOpacity key={idx} style={styles.suggestionItem}
+                                    <TouchableOpacity
+                                      key={idx}
+                                      style={[styles.suggestionItem, idx === suggestedBags.length - 1 && { borderBottomWidth: 0 }]}
                                       onPress={() => {
                                         setSelectedInputBag({ output_bag_qr: bag.output_bag_qr, weight: bag.weight });
                                         setSuggestedBags([]);
                                         setShowSuggestions(false);
                                         setBagSearchQuery('');
                                       }}>
-                                      <Text style={styles.suggestionQr}>{bag.output_bag_qr}</Text>
-                                      <Text style={styles.suggestionWeight}>{bag.weight} kg</Text>
+                                      <View style={{ flex: 1 }}>
+                                        <Text style={styles.suggestionId}>{bag.output_bag_qr}</Text>
+                                        {bag.sub_line ? <Text style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>{bag.sub_line}</Text> : null}
+                                      </View>
+                                      <Text style={styles.suggestionDetail}>{bag.weight} kg</Text>
                                     </TouchableOpacity>
                                   ))}
-                                </View>
+                                </ScrollView>
                               )}
                             </>
                           )}
@@ -3625,6 +4372,13 @@ const DashboardScreen = ({ navigation }: any) => {
                             </Text>
                           </View>
                         </View>
+                        {isShiftEnded ? (
+                          <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#FEF2F2', borderRadius: 10, padding: 12, marginBottom: 8, borderWidth: 1, borderColor: '#FECACA' }}>
+                            <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#EF4444', marginRight: 8 }} />
+                            <Text style={{ fontSize: 13, fontWeight: '700', color: '#DC2626' }}>Shift Ended — View Only</Text>
+                            <Text style={{ fontSize: 12, color: '#7f1d1d', marginLeft: 6 }}>New output is disabled.</Text>
+                          </View>
+                        ) : (
                         <View style={styles.sectionCard}>
                           <View style={styles.sectionHeaderRow}>
                             <View style={[styles.typePill, { backgroundColor: '#DCFCE7' }]}>
@@ -3674,6 +4428,7 @@ const DashboardScreen = ({ navigation }: any) => {
                             <Text style={[styles.primaryButtonText, !weightInput && { color: '#94A3B8' }]}>Generate QR & Print</Text>
                           </TouchableOpacity>
                         </View>
+                        )}
 
                         {/* Shift progress */}
                         <View style={styles.progressCardRedesign}>
@@ -3703,39 +4458,90 @@ const DashboardScreen = ({ navigation }: any) => {
                   <React.Fragment>
                     <View style={styles.selectionContainer}>
                       <Text style={styles.selectionTitle}>Select Extrusion Line</Text>
-                      <TouchableOpacity style={styles.selectionCard} onPress={() => { setPendingExtrusionLine('Extrusion 1'); setShowExtrusionModal(true); }}>
-                        <View style={[styles.selectionIconBox, { backgroundColor: '#f97316' }]}><Zap color="#FFF" size={28} /></View>
-                        <View style={styles.selectionText}>
-                          <Text style={styles.selectionCardTitle}>Extrusion 1</Text>
-                          <Text style={styles.selectionCardSub}>{t('dashboard.primaryExtrusionLine')}</Text>
-                        </View>
-                        <ChevronRight color="#CCC" size={24} />
-                      </TouchableOpacity>
-                      <TouchableOpacity style={styles.selectionCard} onPress={() => { setPendingExtrusionLine('Extrusion 2'); setShowExtrusionModal(true); }}>
-                        <View style={[styles.selectionIconBox, { backgroundColor: '#ea580c' }]}><Zap color="#FFF" size={28} /></View>
-                        <View style={styles.selectionText}>
-                          <Text style={styles.selectionCardTitle}>Extrusion 2</Text>
-                          <Text style={styles.selectionCardSub}>{t('dashboard.secondaryExtrusionLine')}</Text>
-                        </View>
-                        <ChevronRight color="#CCC" size={24} />
-                      </TouchableOpacity>
-                      <TouchableOpacity style={styles.selectionCard} onPress={() => { setPendingExtrusionLine('Extrusion 3'); setShowExtrusionModal(true); }}>
-                        <View style={[styles.selectionIconBox, { backgroundColor: '#c2410c' }]}><Zap color="#FFF" size={28} /></View>
-                        <View style={styles.selectionText}>
-                          <Text style={styles.selectionCardTitle}>Extrusion 3</Text>
-                          <Text style={styles.selectionCardSub}>{t('dashboard.tertiaryExtrusionLine')}</Text>
-                        </View>
-                        <ChevronRight color="#CCC" size={24} />
-                      </TouchableOpacity>
-                      <TouchableOpacity style={styles.selectionCard} onPress={() => { setPendingExtrusionLine('Mixture'); setShowExtrusionModal(true); }}>
-                        <View style={[styles.selectionIconBox, { backgroundColor: '#dc2626' }]}><Zap color="#FFF" size={28} /></View>
-                        <View style={styles.selectionText}>
-                          <Text style={styles.selectionCardTitle}>Mixture</Text>
-                          <Text style={styles.selectionCardSub}>{t('dashboard.mixtureLine')}</Text>
-                        </View>
-                        <ChevronRight color="#CCC" size={24} />
-                      </TouchableOpacity>
+                      {([
+                        { line: 'Extrusion 1', sub: t('dashboard.primaryExtrusionLine'),   color: '#f97316' },
+                        { line: 'Extrusion 2', sub: t('dashboard.secondaryExtrusionLine'),  color: '#ea580c' },
+                        { line: 'Extrusion 3', sub: t('dashboard.tertiaryExtrusionLine'),   color: '#c2410c' },
+                        { line: 'Mixture',     sub: t('dashboard.mixtureLine'),              color: '#dc2626' },
+                      ] as const).map(({ line, sub, color }) => {
+                        const bags = shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === line).length;
+                        const kg   = shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === line).reduce((s: number, l: any) => s + (parseFloat(l.weight) || 0), 0);
+                        return (
+                          <TouchableOpacity
+                            key={line}
+                            style={[styles.selectionCard, isShiftEnded && { opacity: 0.4 }]}
+                            disabled={isShiftEnded}
+                            onPress={() => { setPendingExtrusionLine(line as any); setShowExtrusionModal(true); }}
+                          >
+                            <View style={[styles.selectionIconBox, { backgroundColor: color }]}><Zap color="#FFF" size={28} /></View>
+                            <View style={styles.selectionText}>
+                              <Text style={styles.selectionCardTitle}>{line}</Text>
+                              <Text style={styles.selectionCardSub}>{sub}</Text>
+                            </View>
+                            <View style={{ alignItems: 'flex-end', marginRight: 8 }}>
+                              <Text style={{ fontSize: 13, fontWeight: '700', color: '#1e293b' }}>{bags} bags</Text>
+                              <Text style={{ fontSize: 11, color: '#64748b' }}>{kg.toFixed(1)} kg</Text>
+                            </View>
+                            <ChevronRight color="#CCC" size={24} />
+                          </TouchableOpacity>
+                        );
+                      })}
                     </View>
+
+                    {/* Shift Ended banner for Extrusion */}
+                    {isShiftEnded && (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#FEF2F2', borderRadius: 10, padding: 12, marginBottom: 8, borderWidth: 1, borderColor: '#FECACA' }}>
+                        <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#EF4444', marginRight: 8 }} />
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: '#DC2626' }}>Shift Ended — View Only</Text>
+                        <Text style={{ fontSize: 12, color: '#7f1d1d', marginLeft: 6 }}>New input/output is disabled.</Text>
+                      </View>
+                    )}
+
+                    {/* Extrusion Station Totals */}
+                    {(() => {
+                      const lines = [
+                        { label: 'Extrusion 1', short: 'E1', color: '#f97316' },
+                        { label: 'Extrusion 2', short: 'E2', color: '#ea580c' },
+                        { label: 'Extrusion 3', short: 'E3', color: '#c2410c' },
+                        { label: 'Mixture',     short: 'Mix',color: '#dc2626' },
+                      ];
+                      const totalBags = shiftLogs.filter((l: any) => l.station_id === selectedStation.id).length;
+                      const totalKg   = shiftLogs.filter((l: any) => l.station_id === selectedStation.id).reduce((s: number, l: any) => s + (parseFloat(l.weight) || 0), 0);
+                      return (
+                        <View style={{ marginBottom: 12 }}>
+                          <View style={{ backgroundColor: '#1e293b', borderRadius: 14, padding: 14, marginBottom: 10, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <Text style={{ fontSize: 13, fontWeight: '700', color: '#94a3b8' }}>Extrusion — This Shift</Text>
+                            <View style={{ flexDirection: 'row', gap: 16 }}>
+                              <View style={{ alignItems: 'center' }}>
+                                <Text style={{ fontSize: 20, fontWeight: '800', color: '#fff' }}>{totalBags}</Text>
+                                <Text style={{ fontSize: 10, color: '#94a3b8', marginTop: 1 }}>bags</Text>
+                              </View>
+                              <View style={{ width: 1, backgroundColor: '#334155' }} />
+                              <View style={{ alignItems: 'center' }}>
+                                <Text style={{ fontSize: 20, fontWeight: '800', color: '#fff' }}>{totalKg.toFixed(1)}</Text>
+                                <Text style={{ fontSize: 10, color: '#94a3b8', marginTop: 1 }}>kg</Text>
+                              </View>
+                            </View>
+                          </View>
+                          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                            {lines.map(({ label, short, color }) => {
+                              const bags = shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === label).length;
+                              const kg   = shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === label).reduce((s: number, l: any) => s + (parseFloat(l.weight) || 0), 0);
+                              return (
+                                <View key={label} style={{ width: '48%', backgroundColor: '#fff', borderRadius: 12, padding: 12, borderTopWidth: 3, borderTopColor: color, elevation: 2, shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 4, shadowOffset: { width: 0, height: 2 } }}>
+                                  <Text style={{ fontSize: 12, fontWeight: '700', color, marginBottom: 6 }}>{short}</Text>
+                                  <Text style={{ fontSize: 22, fontWeight: '800', color: '#1e293b' }}>{bags}</Text>
+                                  <Text style={{ fontSize: 11, color: '#64748b', marginTop: 1 }}>bags</Text>
+                                  <View style={{ marginTop: 6, borderTopWidth: 1, borderTopColor: '#f1f5f9', paddingTop: 6 }}>
+                                    <Text style={{ fontSize: 13, fontWeight: '700', color: '#475569' }}>{kg.toFixed(1)} kg</Text>
+                                  </View>
+                                </View>
+                              );
+                            })}
+                          </View>
+                        </View>
+                      );
+                    })()}
 
                     {/* Logs List Section */}
                     <View style={[styles.crusherLogsSection, { marginTop: 8 }]}>
@@ -3869,7 +4675,7 @@ const DashboardScreen = ({ navigation }: any) => {
                               </View>
                             </View>
                             <View style={styles.logActions}>
-                              {user?.role?.toLowerCase() === 'ppic' && (
+                              {(user?.role?.toLowerCase() === 'ppic' || log.status === 'pending') && (
                                 <TouchableOpacity
                                   style={styles.editIconButton}
                                   onPress={() => openEditLogWeight(log)}
@@ -3909,20 +4715,23 @@ const DashboardScreen = ({ navigation }: any) => {
                     {/* Pagination */}
                     {extrusionTotalPages > 1 && (
                       <View style={styles.pagination}>
-                        <TouchableOpacity 
+                        <TouchableOpacity
                           style={[styles.pageBtn, extrusionCurrentPage === 1 && styles.pageBtnDisabled]}
                           onPress={() => extrusionCurrentPage > 1 && setExtrusionCurrentPage(extrusionCurrentPage - 1)}
                           disabled={extrusionCurrentPage === 1}
                         >
-                          <ChevronLeft size={20} color={extrusionCurrentPage === 1 ? "#94a3b8" : "#17a34a"} />
+                          <ChevronLeft size={18} color={extrusionCurrentPage === 1 ? '#cbd5e1' : '#475569'} />
                         </TouchableOpacity>
-                        <Text style={styles.pageInfo}>{extrusionCurrentPage} / {extrusionTotalPages}</Text>
-                        <TouchableOpacity 
+                        <View style={styles.pageInfoBox}>
+                          <Text style={styles.pageInfoMain}>{extrusionCurrentPage} / {extrusionTotalPages}</Text>
+                          <Text style={styles.pageInfoSub}>{extrusionTotalLogs} total</Text>
+                        </View>
+                        <TouchableOpacity
                           style={[styles.pageBtn, extrusionCurrentPage === extrusionTotalPages && styles.pageBtnDisabled]}
                           onPress={() => extrusionCurrentPage < extrusionTotalPages && setExtrusionCurrentPage(extrusionCurrentPage + 1)}
                           disabled={extrusionCurrentPage === extrusionTotalPages}
                         >
-                          <ChevronRight size={20} color={extrusionCurrentPage === extrusionTotalPages ? "#94a3b8" : "#17a34a"} />
+                          <ChevronRight size={18} color={extrusionCurrentPage === extrusionTotalPages ? '#cbd5e1' : '#475569'} />
                         </TouchableOpacity>
                       </View>
                     )}
@@ -3936,6 +4745,14 @@ const DashboardScreen = ({ navigation }: any) => {
                         <Text style={[styles.sublineBadgeText, { color: '#D97706' }]}>Line: {selectedSubLine}</Text>
                       </View>
                     </View>
+                    {isShiftEnded ? (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#FEF2F2', borderRadius: 10, padding: 12, marginBottom: 8, borderWidth: 1, borderColor: '#FECACA' }}>
+                        <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#EF4444', marginRight: 8 }} />
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: '#DC2626' }}>Shift Ended — View Only</Text>
+                        <Text style={{ fontSize: 12, color: '#7f1d1d', marginLeft: 6 }}>New input/output is disabled.</Text>
+                      </View>
+                    ) : (
+                      <>
                     <TouchableOpacity style={styles.sectionOption} onPress={() => setSelectedSection('input')}>
                       <View style={[styles.optionIcon, { backgroundColor: '#f97316' }]}><Plus color="#FFF" size={24} /></View>
                       <View><Text style={styles.optionTitle}>INPUT</Text><Text style={styles.optionSubtitle}>Scan washing bag</Text></View>
@@ -3944,6 +4761,8 @@ const DashboardScreen = ({ navigation }: any) => {
                       <View style={[styles.optionIcon, { backgroundColor: '#17a34a' }]}><Box color="#FFF" size={24} /></View>
                       <View><Text style={styles.optionTitle}>OUTPUT</Text><Text style={styles.optionSubtitle}>Generate bag QR</Text></View>
                     </TouchableOpacity>
+                      </>
+                    )}
                   </View>
                 ) : selectedSection === 'input' ? (
                   <React.Fragment>
@@ -3973,22 +4792,25 @@ const DashboardScreen = ({ navigation }: any) => {
                           />
                         </View>
                         {showSuggestions && (
-                          <View style={styles.suggestionsList}>
+                          <ScrollView style={styles.suggestionsList} keyboardShouldPersistTaps="handled" nestedScrollEnabled>
                             {suggestedBags.map((bag, i) => (
-                              <TouchableOpacity 
-                                key={i} 
-                                style={styles.suggestionItem}
+                              <TouchableOpacity
+                                key={i}
+                                style={[styles.suggestionItem, i === suggestedBags.length - 1 && { borderBottomWidth: 0 }]}
                                 onPress={() => {
                                   setSelectedInputBag(bag);
                                   setShowSuggestions(false);
                                   setBagSearchQuery('');
                                 }}
                               >
-                                <Text style={styles.suggestionId}>{bag.output_bag_qr}</Text>
+                                <View style={{ flex: 1 }}>
+                                  <Text style={styles.suggestionId}>{bag.output_bag_qr}</Text>
+                                  {bag.sub_line ? <Text style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>{bag.sub_line}</Text> : null}
+                                </View>
                                 <Text style={styles.suggestionDetail}>{bag.weight} kg</Text>
                               </TouchableOpacity>
                             ))}
-                          </View>
+                          </ScrollView>
                         )}
                       </View>
                       <TouchableOpacity style={styles.scanButton} onPress={() => { setScanned(false); setShowScanner(true); }}>
@@ -4175,12 +4997,35 @@ const DashboardScreen = ({ navigation }: any) => {
             ) : (
               <>
                 <View style={[styles.stationHero, { backgroundColor: selectedStation.color }]}><View style={styles.heroHeader}>{renderStationIcon(selectedStation.name, selectedStation.color)}<View style={{ marginLeft: 15, flex: 1 }}><Text style={styles.heroTitle}>{selectedStation.name}</Text><Text style={styles.heroDesc}>{selectedStation.description}</Text></View></View></View>
-                <View style={styles.formCard}>
+                {isShiftEnded && (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#FEF2F2', borderRadius: 10, padding: 12, marginHorizontal: 16, marginTop: 12, marginBottom: 4, borderWidth: 1, borderColor: '#FECACA' }}>
+                    <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#EF4444', marginRight: 8 }} />
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: '#DC2626' }}>Shift Ended — View Only</Text>
+                    <Text style={{ fontSize: 12, color: '#7f1d1d', marginLeft: 6 }}>New input/output is disabled.</Text>
+                  </View>
+                )}
+                <View style={[styles.formCard, { display: isShiftEnded ? 'none' : 'flex' }]}>
                   {selectedSection === 'input' ? (
                     <View>
                       <Text style={styles.formTitle}>Input Material</Text>
                       <View style={styles.searchContainer}><View style={styles.searchInputWrapper}><Search size={20} color="#666" style={{ marginRight: 10 }} /><TextInput style={styles.searchTextInput} placeholder="Search ID..." value={bagSearchQuery} onChangeText={onBagSearch} onFocus={handleBagSearchFocus} /></View>
-                        {showSuggestions && (<View style={styles.suggestionsList}>{suggestedBags.map((bag, i) => (<TouchableOpacity key={i} style={styles.suggestionItem} onPress={() => { setSelectedInputBag(bag); setShowSuggestions(false); setBagSearchQuery(''); }}><Text style={styles.suggestionId}>{bag.output_bag_qr}</Text><Text style={styles.suggestionDetail}>{bag.weight} kg</Text></TouchableOpacity>))}</View>)}
+                        {showSuggestions && (
+                          <ScrollView style={styles.suggestionsList} keyboardShouldPersistTaps="handled" nestedScrollEnabled>
+                            {suggestedBags.map((bag, i) => (
+                              <TouchableOpacity
+                                key={i}
+                                style={[styles.suggestionItem, i === suggestedBags.length - 1 && { borderBottomWidth: 0 }]}
+                                onPress={() => { setSelectedInputBag(bag); setShowSuggestions(false); setBagSearchQuery(''); }}
+                              >
+                                <View style={{ flex: 1 }}>
+                                  <Text style={styles.suggestionId}>{bag.output_bag_qr}</Text>
+                                  {bag.sub_line ? <Text style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>{bag.sub_line}</Text> : null}
+                                </View>
+                                <Text style={styles.suggestionDetail}>{bag.weight} kg</Text>
+                              </TouchableOpacity>
+                            ))}
+                          </ScrollView>
+                        )}
                   </View>
                       <TouchableOpacity style={styles.scanButton} onPress={() => { setScanned(false); setShowScanner(true); }}><CameraIcon color="#17a34a" size={20} /><Text style={styles.scanButtonText}>Scan QR Code</Text></TouchableOpacity>
                       {selectedInputBag && (<View style={styles.selectedBagCard}><View style={{ flex: 1 }}><Text style={styles.selectedBagId}>{selectedInputBag.output_bag_qr}</Text><Text style={styles.selectedBagWeight}>{selectedInputBag.weight} kg</Text></View><TouchableOpacity onPress={() => setSelectedInputBag(null)}><X color="#EB445A" size={20} /></TouchableOpacity></View>)}
@@ -4199,7 +5044,7 @@ const DashboardScreen = ({ navigation }: any) => {
                             // Check if this is Final Packaging station
                             const isFinalPackaging = selectedStation?.id === 5 ||
                               selectedStation?.name?.toLowerCase().includes('final') ||
-                              selectedStation?.name?.toLowerCase().includes('packing');
+                              selectedStation?.name?.toLowerCase().includes('re-packaging');
                             
                             // If this is washing station, ONLY update the existing crusher batch (NO new entry)
                             if (isWashingStation && selectedInputBag.output_bag_qr) {
@@ -4271,6 +5116,187 @@ const DashboardScreen = ({ navigation }: any) => {
                     <View><Text style={styles.formTitle}>{t('dashboard.outputRecording')}</Text><View style={styles.inputGroup}><Text style={styles.label}>{t('dashboard.weightKg')}</Text><TextInput style={styles.input} keyboardType="numeric" placeholder="0.00" value={weightInput} onChangeText={setWeightInput} /></View><TouchableOpacity style={styles.primaryButton} disabled={!weightInput || isLoading} onPress={handleLogProduction}><PrinterIcon color="#FFF" size={20} /><Text style={styles.primaryButtonText}>{t('dashboard.generateQRPrint')}</Text></TouchableOpacity></View>
                   )}
         </View>
+
+                {/* Re-Packaging Station Totals */}
+                {(() => {
+                  const logs = shiftLogs.filter((l: any) => l.station_id === selectedStation.id);
+                  const totalBags = logs.length;
+                  const totalKg = logs.reduce((s: number, l: any) => s + (parseFloat(l.weight) || 0), 0);
+                  return (
+                    <View style={{ marginHorizontal: 16, marginTop: 12, marginBottom: 4 }}>
+                      {/* Dark header bar */}
+                      <View style={{ backgroundColor: '#1e293b', borderRadius: 14, paddingVertical: 14, paddingHorizontal: 18, marginBottom: 10, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: '#94a3b8', letterSpacing: 0.3 }}>Re-Packaging — This Shift</Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 16 }}>
+                          <View style={{ alignItems: 'center' }}>
+                            <Text style={{ fontSize: 22, fontWeight: '800', color: '#fff', lineHeight: 26 }}>{totalBags}</Text>
+                            <Text style={{ fontSize: 10, color: '#94a3b8', marginTop: 1 }}>bags</Text>
+                          </View>
+                          <View style={{ width: 1, height: 32, backgroundColor: '#334155' }} />
+                          <View style={{ alignItems: 'center' }}>
+                            <Text style={{ fontSize: 22, fontWeight: '800', color: '#fff', lineHeight: 26 }}>{totalKg.toFixed(1)}</Text>
+                            <Text style={{ fontSize: 10, color: '#94a3b8', marginTop: 1 }}>kg</Text>
+                          </View>
+                        </View>
+                      </View>
+                      {/* Two stat cards */}
+                      <View style={{ flexDirection: 'row', gap: 10 }}>
+                        <View style={{ flex: 1, backgroundColor: '#fff', borderRadius: 14, paddingVertical: 18, paddingHorizontal: 14, borderTopWidth: 3, borderTopColor: '#22c55e', elevation: 2, alignItems: 'center', shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 6, shadowOffset: { width: 0, height: 2 } }}>
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: '#22c55e', letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 6 }}>Total Bags</Text>
+                          <Text style={{ fontSize: 32, fontWeight: '800', color: '#1e293b', lineHeight: 36 }}>{totalBags}</Text>
+                          <Text style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>bags this shift</Text>
+                        </View>
+                        <View style={{ flex: 1, backgroundColor: '#fff', borderRadius: 14, paddingVertical: 18, paddingHorizontal: 14, borderTopWidth: 3, borderTopColor: '#10b981', elevation: 2, alignItems: 'center', shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 6, shadowOffset: { width: 0, height: 2 } }}>
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: '#10b981', letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 6 }}>Total Weight</Text>
+                          <Text style={{ fontSize: 32, fontWeight: '800', color: '#1e293b', lineHeight: 36 }}>{totalKg.toFixed(1)}</Text>
+                          <Text style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>kg this shift</Text>
+                        </View>
+                      </View>
+                    </View>
+                  );
+                })()}
+
+                <View style={[styles.crusherLogsSection, { marginTop: 16, marginHorizontal: 16 }]}>
+                  <View style={styles.logsHeader}>
+                    <Text style={styles.logsTitle}>Recent Entries</Text>
+                  </View>
+                  <View style={styles.datePickerContainer}>
+                    <Text style={styles.datePickerLabel}>Select Date:</Text>
+                    <StationDatePicker
+                      value={parseDateLocal(packingSelectedDate)}
+                      onChange={(date) => {
+                        setPackingSelectedDate(formatDateLocal(date));
+                        setPackingCurrentPage(1);
+                      }}
+                      maximumDate={maxDate}
+                    />
+                  </View>
+
+                  {/* Search */}
+                  <View style={styles.searchBox}>
+                    <Search size={18} color="#64748b" />
+                    <TextInput
+                      style={styles.searchInput}
+                      placeholder="Search by QR code..."
+                      value={packingSearchQuery}
+                      onChangeText={(text) => { setPackingSearchQuery(text); setPackingCurrentPage(1); }}
+                      placeholderTextColor="#94a3b8"
+                      clearButtonMode="while-editing"
+                      returnKeyType="search"
+                      autoCorrect={false}
+                      autoCapitalize="none"
+                      spellCheck={false}
+                    />
+                    {packingSearchQuery.length > 0 && (
+                      <TouchableOpacity
+                        onPress={() => { setPackingSearchQuery(''); setPackingCurrentPage(1); }}
+                        style={styles.clearButton}
+                      >
+                        <X size={16} color="#64748b" />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+
+                  {/* Status Filter */}
+                  <View style={styles.filtersContainer}>
+                    <View style={styles.filterGroup}>
+                      <Text style={styles.filterLabel}>Status:</Text>
+                      <View style={styles.filterButtons}>
+                        <TouchableOpacity
+                          style={[styles.filterButton, packingSelectedStatusFilter === 'all' && styles.filterButtonActive]}
+                          onPress={() => { setPackingSelectedStatusFilter('all'); setPackingCurrentPage(1); }}
+                        >
+                          <Text style={[styles.filterButtonText, packingSelectedStatusFilter === 'all' && styles.filterButtonTextActive]}>All</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[styles.filterButton, packingSelectedStatusFilter === 'pending' && styles.filterButtonActive]}
+                          onPress={() => { setPackingSelectedStatusFilter('pending'); setPackingCurrentPage(1); }}
+                        >
+                          <Text style={[styles.filterButtonText, packingSelectedStatusFilter === 'pending' && styles.filterButtonTextActive]}>Pending</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[styles.filterButton, packingSelectedStatusFilter === 'Completed' && styles.filterButtonActive]}
+                          onPress={() => { setPackingSelectedStatusFilter('Completed'); setPackingCurrentPage(1); }}
+                        >
+                          <Text style={[styles.filterButtonText, packingSelectedStatusFilter === 'Completed' && styles.filterButtonTextActive]}>Complete</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  </View>
+
+                  {packingLogsLoading ? (
+                    <View style={styles.loadingState}>
+                      <ActivityIndicator size="large" color="#17a34a" />
+                      <Text style={styles.loadingText}>Loading entries...</Text>
+                    </View>
+                  ) : packingLogs.length > 0 ? (
+                    <View style={styles.logsList}>
+                      {packingLogs.map((log, index) => (
+                        <View key={index} style={styles.logItem}>
+                          <View style={styles.logMain}>
+                            <Text style={styles.logQr}>{log.output_bag_qr}</Text>
+                            <View style={styles.logDetails}>
+                              <Text style={styles.logWeight}>{log.weight} kg</Text>
+                              <View style={[styles.statusBadge, log.status === 'pending' ? styles.statusPending : styles.statusCompleted]}>
+                                <Text style={[styles.statusBadgeText, log.status === 'pending' ? styles.statusPendingText : styles.statusCompletedText]}>
+                                  {log.status || 'Completed'}
+                                </Text>
+                              </View>
+                            </View>
+                          </View>
+                          <View style={styles.logActions}>
+                            {(user?.role?.toLowerCase() === 'ppic' || log.status === 'pending') && (
+                              <TouchableOpacity
+                                style={styles.editIconButton}
+                                onPress={() => openEditLogWeight(log)}
+                              >
+                                <Pencil color="#0ea5e9" size={18} />
+                              </TouchableOpacity>
+                            )}
+                            <TouchableOpacity
+                              style={styles.printIconButton}
+                              onPress={() => {
+                                setSelectedLogForPrint(log);
+                                setShowListPrintPreview(true);
+                              }}
+                            >
+                              <Printer size={18} color="#17a34a" />
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                      ))}
+                    </View>
+                  ) : (
+                    <View style={styles.emptyState}>
+                      <Package size={48} color="#94a3b8" opacity={0.5} />
+                      <Text style={styles.emptyText}>No entries found for this date</Text>
+                    </View>
+                  )}
+
+                  {/* Pagination */}
+                  {packingTotalPages > 1 && (
+                    <View style={styles.pagination}>
+                      <TouchableOpacity
+                        style={[styles.pageBtn, packingCurrentPage === 1 && styles.pageBtnDisabled]}
+                        onPress={() => packingCurrentPage > 1 && setPackingCurrentPage(packingCurrentPage - 1)}
+                        disabled={packingCurrentPage === 1}
+                      >
+                        <ChevronLeft size={18} color={packingCurrentPage === 1 ? '#cbd5e1' : '#475569'} />
+                      </TouchableOpacity>
+                      <View style={styles.pageInfoBox}>
+                        <Text style={styles.pageInfoMain}>{packingCurrentPage} / {packingTotalPages}</Text>
+                        <Text style={styles.pageInfoSub}>{packingTotalLogs} total</Text>
+                      </View>
+                      <TouchableOpacity
+                        style={[styles.pageBtn, packingCurrentPage === packingTotalPages && styles.pageBtnDisabled]}
+                        onPress={() => packingCurrentPage < packingTotalPages && setPackingCurrentPage(packingCurrentPage + 1)}
+                        disabled={packingCurrentPage === packingTotalPages}
+                      >
+                        <ChevronRight size={18} color={packingCurrentPage === packingTotalPages ? '#cbd5e1' : '#475569'} />
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                </View>
               </>
             )}
           </View>
@@ -4382,8 +5408,9 @@ const DashboardScreen = ({ navigation }: any) => {
                 </View>
               </View>
 
-              {/* Jumbo bag type: Pending (temporary) or Completed (final) */}
-              {!isCurrentLogSaved && (
+              {/* Jumbo bag type toggle — hidden for crusher (3E/Rapid/Betty are always pending) */}
+              {!isCurrentLogSaved &&
+               !selectedStation?.name?.toLowerCase().includes('crusher') && (
                 <View style={[styles.inputGroup, { marginTop: 12, width: '100%' }]}>
                   <Text style={styles.label}>{t('dashboard.jumboBagType')}</Text>
                   <View style={styles.filterButtons}>
@@ -5130,10 +6157,13 @@ const styles = StyleSheet.create({
   emptyText: { marginTop: 12, fontSize: 14, color: '#94a3b8' },
   loadingState: { alignItems: 'center', paddingVertical: 40 },
   loadingText: { marginTop: 12, fontSize: 14, color: '#94a3b8' },
-  pagination: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 16, borderTopWidth: 1, borderTopColor: '#e2e8f0' },
-  pageBtn: { padding: 8, borderRadius: 8, backgroundColor: '#f1f5f9', borderWidth: 1, borderColor: '#e2e8f0' },
-  pageBtnDisabled: { opacity: 0.4 },
+  pagination: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 16, paddingTop: 14, paddingHorizontal: 4, borderTopWidth: 1, borderTopColor: '#e2e8f0' },
+  pageBtn: { width: 36, height: 36, borderRadius: 10, backgroundColor: '#f1f5f9', borderWidth: 1, borderColor: '#e2e8f0', alignItems: 'center', justifyContent: 'center' },
+  pageBtnDisabled: { opacity: 0.35 },
   pageInfo: { fontSize: 13, color: '#64748b', fontWeight: '500' },
+  pageInfoBox: { alignItems: 'center' },
+  pageInfoMain: { fontSize: 14, fontWeight: '700', color: '#1e293b' },
+  pageInfoSub: { fontSize: 11, color: '#94a3b8', marginTop: 1 },
   formCard: { backgroundColor: '#FFF', borderRadius: 20, marginHorizontal: 16, marginTop: -20, padding: 24, elevation: 3 },
   formTitle: { fontSize: 18, fontWeight: '700', color: '#333', marginBottom: 20 },
   inputGroup: { marginBottom: 20 },
@@ -5165,25 +6195,44 @@ const styles = StyleSheet.create({
     outlineColor: 'transparent'
   },
   suggestionsList: {
-    position: 'absolute',
-    top: 50,
-    left: 0,
-    right: 0,
-    backgroundColor: '#FFF',
+    backgroundColor: '#fff',
     borderWidth: 1,
-    borderColor: '#EEE',
-    borderRadius: 10,
-    elevation: 5,
-    zIndex: 1000,
-    maxHeight: 240,
+    borderColor: '#e2e8f0',
+    borderRadius: 12,
+    marginTop: 6,
+    maxHeight: 280,
+    overflow: 'hidden',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 6,
   },
-  suggestionItem: { padding: 12, borderBottomWidth: 1, borderBottomColor: '#F0F0F0', flexDirection: 'row', justifyContent: 'space-between' },
-  suggestionId: { fontSize: 14, fontWeight: '600', color: '#333' },
-  suggestionDetail: { fontSize: 12, color: '#666' },
+  suggestionsContainer: {
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 12,
+    marginTop: 6,
+    maxHeight: 280,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 6,
+  },
+  suggestionItem: {
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  suggestionId: { fontSize: 14, fontWeight: '600', color: '#1e293b', flex: 1 },
+  suggestionDetail: { fontSize: 13, color: '#64748b', fontWeight: '500', marginLeft: 8 },
   scanButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#17a34a', borderStyle: 'dashed', borderRadius: 12, padding: 16, marginBottom: 20 },
   scanButtonText: { color: '#17a34a', fontSize: 16, fontWeight: '700', marginLeft: 10 },
   selectedBagCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F0F9FF', borderRadius: 12, padding: 16, marginBottom: 20, borderWidth: 1, borderColor: '#BAE6FD' },

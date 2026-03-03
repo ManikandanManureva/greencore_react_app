@@ -10,7 +10,9 @@ import { ActivityIndicator, View } from 'react-native';
 const Stack = createStackNavigator();
 
 const AppNavigator = () => {
-  const { isAuthenticated, isLoading, selectedShift } = useAuth();
+  const { isAuthenticated, isLoading, selectedShift, user } = useAuth();
+
+  const isPPIC = user?.role?.toLowerCase() === 'ppic';
 
   if (isLoading) {
     return (
@@ -25,7 +27,7 @@ const AppNavigator = () => {
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         {!isAuthenticated ? (
           <Stack.Screen name="Login" component={LoginScreen} />
-        ) : !selectedShift ? (
+        ) : !selectedShift && !isPPIC ? (
           <Stack.Group>
             <Stack.Screen name="ShiftSelection" component={ShiftSelectionScreen} />
           </Stack.Group>
