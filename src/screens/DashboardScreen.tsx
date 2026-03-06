@@ -65,7 +65,7 @@ function parseDateLocal(s: string): Date {
 
 const DashboardScreen = ({ navigation }: any) => {
   const { user, logout, selectedShift } = useAuth();
-
+  
   // PE (Polyethylene) material flow — separate from PC, does not affect PC logic
   const isPE = user?.role?.toLowerCase() === 'pe';
 
@@ -158,6 +158,29 @@ const DashboardScreen = ({ navigation }: any) => {
   >(null);
   /** PE only: selected output type (e.g. 'Flakes PE SUPER') for Crusher-Washing station */
   const [peOutputType, setPeOutputType] = useState<string | null>(null);
+  /** PE Crusher-Washing: search and filter for raw material list */
+  const [peRawMaterialSearch, setPeRawMaterialSearch] = useState('');
+  const [peRawMaterialFilter, setPeRawMaterialFilter] = useState<'all' | 'PE' | 'EVA'>('all');
+  /** PE Crusher-Washing: Recent Entries list (like PC Crusher) */
+  const [peCrusherLogs, setPeCrusherLogs] = useState<any[]>([]);
+  const [peCrusherLogsLoading, setPeCrusherLogsLoading] = useState(false);
+  const [peCrusherSelectedDate, setPeCrusherSelectedDate] = useState(formatDateLocal(new Date()));
+  const [peCrusherSearchQuery, setPeCrusherSearchQuery] = useState('');
+  const [peCrusherLineFilter, setPeCrusherLineFilter] = useState<string>('all');
+  const [peCrusherStatusFilter, setPeCrusherStatusFilter] = useState<string>('all');
+  const [peCrusherCurrentPage, setPeCrusherCurrentPage] = useState(1);
+  const [peCrusherTotalPages, setPeCrusherTotalPages] = useState(1);
+  const [peCrusherTotalLogs, setPeCrusherTotalLogs] = useState(0);
+  /** PE Extrusion & Packaging: Recent Entries list */
+  const [peExtrusionLogs, setPeExtrusionLogs] = useState<any[]>([]);
+  const [peExtrusionLogsLoading, setPeExtrusionLogsLoading] = useState(false);
+  const [peExtrusionSelectedDate, setPeExtrusionSelectedDate] = useState(formatDateLocal(new Date()));
+  const [peExtrusionSearchQuery, setPeExtrusionSearchQuery] = useState('');
+  const [peExtrusionLineFilter, setPeExtrusionLineFilter] = useState<string>('all');
+  const [peExtrusionStatusFilter, setPeExtrusionStatusFilter] = useState<string>('all');
+  const [peExtrusionCurrentPage, setPeExtrusionCurrentPage] = useState(1);
+  const [peExtrusionTotalPages, setPeExtrusionTotalPages] = useState(1);
+  const [peExtrusionTotalLogs, setPeExtrusionTotalLogs] = useState(0);
   const [currentViewBags, setCurrentViewBags] = useState(0);
   const [currentViewWeight, setCurrentViewWeight] = useState(0);
   
@@ -287,6 +310,18 @@ const DashboardScreen = ({ navigation }: any) => {
 
   /** Stable "today" for date picker max – avoids picker resetting when prop reference changes. */
   const maxDate = useMemo(() => new Date(), []);
+
+  /** JUMBO/bag ID from API (supports snake_case and camelCase so web and native both show full ID). */
+  const getBagDisplayId = (bag: any): string =>
+    (bag?.output_bag_qr ?? bag?.outputBagQr ?? bag?.input_bag_qr ?? bag?.inputBagQr ?? '—') as string;
+
+  /** Normalize search result bags so QR is always in output_bag_qr/outputBagQr for dropdown display. */
+  const normalizeSuggestedBags = (bags: any[]): any[] =>
+    (bags || []).map((b: any) => ({
+      ...b,
+      output_bag_qr: b.output_bag_qr ?? b.outputBagQr ?? b.input_bag_qr ?? b.inputBagQr,
+      outputBagQr: b.outputBagQr ?? b.output_bag_qr ?? b.inputBagQr ?? b.input_bag_qr,
+    }));
 
   // Initial Load
   useEffect(() => {
@@ -471,11 +506,11 @@ const DashboardScreen = ({ navigation }: any) => {
               setShiftEndedAt(endMs);
               setShiftDuration(formatDuration(endMs - startMs));
               const logsRes = await productionApi.getShiftLogs(latest.id);
-              if (logsRes.data.success) setShiftLogs(logsRes.data.data);
-            } else {
-              setIsShiftActive(false);
-              setBackendShiftId(null);
-              setShiftLogs([]);
+        if (logsRes.data.success) setShiftLogs(logsRes.data.data);
+      } else {
+        setIsShiftActive(false);
+        setBackendShiftId(null);
+        setShiftLogs([]);
             }
           } else {
             setIsShiftActive(false);
@@ -548,13 +583,13 @@ const DashboardScreen = ({ navigation }: any) => {
   // Auto-close shift: warn at scheduled end time, force-close 15 min after
   useEffect(() => {
     if (!isShiftActive || !backendShiftId || !selectedShift || !shiftStartTime) return;
-
+    
     let closing = false; // guard against double-close
 
     const tick = async () => {
       const times = getShiftAutoCloseTimes(shiftStartTime, selectedShift);
       if (!times) return;
-
+      
       const now = Date.now();
 
       // ── Grace period expired → auto-close ──────────────────────────────────
@@ -570,13 +605,13 @@ const DashboardScreen = ({ navigation }: any) => {
               [{
                 text: 'OK',
                 onPress: () => {
-                  setIsShiftActive(false);
-                  setBackendShiftId(null);
-                  setShiftLogs([]);
-                  setShiftStartTime(null);
-                  setSelectedStation(null);
-                  setSelectedSection(null);
-                  setSelectedSubLine(null);
+                setIsShiftActive(false);
+                setBackendShiftId(null);
+                setShiftLogs([]);
+                setShiftStartTime(null);
+                setSelectedStation(null);
+                setSelectedSection(null);
+                setSelectedSubLine(null);
                   setAutoCloseWarningShown(false);
                 },
               }],
@@ -622,7 +657,7 @@ const DashboardScreen = ({ navigation }: any) => {
           color: uiColors[s.name] || '#64748b',
           // For PE, rename Crusher card to "Crusher-Washing" in the UI
           displayName: isPE && s.name === 'Crusher' ? 'Crusher-Washing' : s.name,
-        }));
+          }));
         setStations(mappedStations);
       }
     } catch (error) {
@@ -830,11 +865,11 @@ const DashboardScreen = ({ navigation }: any) => {
       });
       // Use PUT (delete + reinsert) so retrying shift close never creates duplicate by-product rows
       await productionApi.updateByProducts(backendShiftId, toSave.map(p => ({
-        stationId: p.stationId,
-        name: p.name,
-        weight: typeof p.weight === 'number' ? p.weight : Number(p.weight) || 0,
-        category: p.category ?? '',
-      })));
+          stationId: p.stationId,
+          name: p.name,
+          weight: typeof p.weight === 'number' ? p.weight : Number(p.weight) || 0,
+          category: p.category ?? '',
+        })));
       const response = await productionApi.endShift(backendShiftId, endShiftRemark.trim() || undefined);
       if (response.data.success) {
         const savedShiftId = backendShiftId;
@@ -933,7 +968,7 @@ const DashboardScreen = ({ navigation }: any) => {
     setSavedByProductsMeta(null);
     // PPIC stays on their home dashboard — no ShiftSelection navigation needed
     if (user?.role?.toLowerCase() !== 'ppic') {
-      navigation.navigate('ShiftSelection');
+    navigation.navigate('ShiftSelection');
     }
   };
 
@@ -1101,9 +1136,11 @@ const DashboardScreen = ({ navigation }: any) => {
           log.id === editingLogWeight.id ? { ...log, weight: w } : log
         ));
       } else if (selectedStation?.name === 'Extrusion & Packaging') {
-        setExtrusionLogs(prev => prev.map(log => 
-          log.id === editingLogWeight.id ? { ...log, weight: w } : log
-        ));
+        if (isPE) {
+          setPeExtrusionLogs(prev => prev.map(log => log.id === editingLogWeight.id ? { ...log, weight: w } : log));
+        } else {
+          setExtrusionLogs(prev => prev.map(log => log.id === editingLogWeight.id ? { ...log, weight: w } : log));
+        }
       } else if (
         selectedStation?.id === 5 ||
         selectedStation?.name?.toLowerCase().includes('final') ||
@@ -1141,10 +1178,10 @@ const DashboardScreen = ({ navigation }: any) => {
       
       const response = await productionApi.getCrusherLogs(
         lineFilter,
-        selectedDate,
+        selectedDate, 
         searchQuery || undefined,
         statusFilter,
-        currentPage,
+        currentPage, 
         10,
         // Only scope to current shift when viewing today — for past dates use the date filter
         selectedDate === formatDateLocal(new Date()) ? backendShiftId : undefined
@@ -1161,6 +1198,66 @@ const DashboardScreen = ({ navigation }: any) => {
     }
   };
 
+  /** PE Crusher-Washing: load recent entries (same API as PC crusher, CRS station; sub_line = output type e.g. Flakes PE SUPER). */
+  const loadPeCrusherLogs = async () => {
+    try {
+      setPeCrusherLogsLoading(true);
+      const subLineMap: Record<string, string> = {
+        'PE SUPER': 'Flakes PE SUPER',
+        'PE 1': 'Flakes PE 1',
+        'EVA SUPER': 'Flakes EVA SUPER',
+        'EVA 1': 'Flakes EVA 1',
+      };
+      const subLine = peCrusherLineFilter !== 'all' ? (subLineMap[peCrusherLineFilter] || undefined) : undefined;
+      const statusFilter = peCrusherStatusFilter !== 'all' ? peCrusherStatusFilter : undefined;
+      const response = await productionApi.getCrusherLogs(
+        subLine,
+        peCrusherSelectedDate,
+        peCrusherSearchQuery || undefined,
+        statusFilter,
+        peCrusherCurrentPage,
+        10,
+        peCrusherSelectedDate === formatDateLocal(new Date()) ? backendShiftId : undefined
+      );
+      if (response.data.success) {
+        setPeCrusherLogs(response.data.data);
+        setPeCrusherTotalPages(response.data.pagination.totalPages);
+        setPeCrusherTotalLogs(response.data.pagination.total);
+      }
+    } catch (error) {
+      console.error('Error loading PE crusher logs:', error);
+    } finally {
+      setPeCrusherLogsLoading(false);
+    }
+  };
+
+  /** PE Extrusion & Packaging: load recent entries (same API as PC extrusion; sub_line = Pellet PE SUPER, etc.). */
+  const loadPeExtrusionLogs = async () => {
+    try {
+      setPeExtrusionLogsLoading(true);
+      const subLine = peExtrusionLineFilter !== 'all' ? peExtrusionLineFilter : undefined;
+      const statusFilter = peExtrusionStatusFilter !== 'all' ? peExtrusionStatusFilter : undefined;
+      const response = await productionApi.getExtrusionLogs(
+        subLine,
+        peExtrusionSelectedDate,
+        peExtrusionSearchQuery || undefined,
+        statusFilter,
+        peExtrusionCurrentPage,
+        10,
+        peExtrusionSelectedDate === formatDateLocal(new Date()) ? backendShiftId : undefined
+      );
+      if (response.data.success) {
+        setPeExtrusionLogs(response.data.data);
+        setPeExtrusionTotalPages(response.data.pagination.totalPages);
+        setPeExtrusionTotalLogs(response.data.pagination.total);
+      }
+    } catch (error) {
+      console.error('Error loading PE extrusion logs:', error);
+    } finally {
+      setPeExtrusionLogsLoading(false);
+    }
+  };
+
   const loadWashingLogs = async () => {
     // Load all entries (Washing 1, 2, 3) when no sub-line is selected
     // Load filtered entries when a sub-line is selected
@@ -1172,10 +1269,10 @@ const DashboardScreen = ({ navigation }: any) => {
       
       const response = await productionApi.getWashingLogs(
         lineFilter,
-        washingSelectedDate,
+        washingSelectedDate, 
         washingSearchQuery || undefined,
         statusFilter,
-        washingCurrentPage,
+        washingCurrentPage, 
         10,
         washingSelectedDate === formatDateLocal(new Date()) ? backendShiftId : undefined
       );
@@ -1202,10 +1299,10 @@ const DashboardScreen = ({ navigation }: any) => {
       
       const response = await productionApi.getExtrusionLogs(
         lineFilter,
-        extrusionSelectedDate,
+        extrusionSelectedDate, 
         extrusionSearchQuery || undefined,
         statusFilter,
-        extrusionCurrentPage,
+        extrusionCurrentPage, 
         10,
         extrusionSelectedDate === formatDateLocal(new Date()) ? backendShiftId : undefined
       );
@@ -1353,7 +1450,8 @@ const DashboardScreen = ({ navigation }: any) => {
   useEffect(() => {
     // Load logs when in Crusher station view (whether sub-line is selected or not)
     if (selectedStation?.name === 'Crusher') {
-      loadCrusherLogs();
+      if (isPE) loadPeCrusherLogs();
+      else loadCrusherLogs();
     }
     // Load logs when in Washing station view (whether sub-line is selected or not)
     if (selectedStation?.name === 'Washing') {
@@ -1361,13 +1459,14 @@ const DashboardScreen = ({ navigation }: any) => {
     }
     // Load logs when in Extrusion station view (whether sub-line is selected or not)
     if (selectedStation?.name === 'Extrusion & Packaging') {
-      loadExtrusionLogs();
+      if (isPE) loadPeExtrusionLogs();
+      else loadExtrusionLogs();
     }
     // Load logs when in Final Packaging station view
     if (selectedStation?.id === 5 || selectedStation?.name?.toLowerCase().includes('final') || selectedStation?.name?.toLowerCase().includes('re-packaging')) {
       loadPackingLogs();
     }
-  }, [selectedSubLine, selectedDate, searchQuery, currentPage, selectedStation, selectedLineFilter, selectedStatusFilter, washingSelectedDate, washingSearchQuery, washingCurrentPage, washingSelectedLineFilter, washingSelectedStatusFilter, extrusionSelectedDate, extrusionSearchQuery, extrusionCurrentPage, extrusionSelectedLineFilter, extrusionSelectedStatusFilter, packingSelectedDate, packingSearchQuery, packingCurrentPage, packingSelectedStatusFilter]);
+  }, [selectedSubLine, selectedDate, searchQuery, currentPage, selectedStation, selectedLineFilter, selectedStatusFilter, washingSelectedDate, washingSearchQuery, washingCurrentPage, washingSelectedLineFilter, washingSelectedStatusFilter, extrusionSelectedDate, extrusionSearchQuery, extrusionCurrentPage, extrusionSelectedLineFilter, extrusionSelectedStatusFilter, packingSelectedDate, packingSearchQuery, packingCurrentPage, packingSelectedStatusFilter, isPE, peCrusherSelectedDate, peCrusherSearchQuery, peCrusherCurrentPage, peCrusherLineFilter, peCrusherStatusFilter, peExtrusionSelectedDate, peExtrusionSearchQuery, peExtrusionCurrentPage, peExtrusionLineFilter, peExtrusionStatusFilter]);
 
   useEffect(() => {
     if (showShiftClosedView && closedShiftId) {
@@ -1496,8 +1595,8 @@ const DashboardScreen = ({ navigation }: any) => {
           expectedStationName = 'Crusher-Washing';
         } else {
           // PC Extrusion: input comes from Washing (WSH) bags
-          targetStationId = 3;
-          expectedStationName = 'washing';
+        targetStationId = 3;
+        expectedStationName = 'washing';
         }
         statusFilter = 'pending';
       } else if (selectedSection === 'input' && (selectedStation?.id === 5 || selectedStation?.name?.toLowerCase().includes('final') || selectedStation?.name?.toLowerCase().includes('re-packaging'))) {
@@ -1506,7 +1605,7 @@ const DashboardScreen = ({ navigation }: any) => {
         const washStation = stations.find((s: Station) => s.name?.toLowerCase().includes('washing') || (s as any).code === 'WSH');
         if (extStation) {
           targetStationId = extStation.id;
-          expectedStationName = 'extrusion';
+        expectedStationName = 'extrusion';
         } else if (washStation) {
           targetStationId = washStation.id;
           expectedStationName = 'washing';
@@ -1625,7 +1724,7 @@ const DashboardScreen = ({ navigation }: any) => {
             ? selectedSubLine   // e.g. 'Pellet PE SUPER'
             : peOutputType)     // e.g. 'Flakes PE SUPER'
         : selectedSubLine;
-
+      
       const response = await productionApi.logProduction({
         shiftId: backendShiftId,
         stationId: selectedStation.id,
@@ -1661,7 +1760,7 @@ const DashboardScreen = ({ navigation }: any) => {
             console.error('Error marking input bag as Completed:', err);
           }
         }
-
+        
         // Reload shift logs to get updated data (especially for extrusion totals calculation)
         if (backendShiftId) {
           try {
@@ -1718,11 +1817,11 @@ const DashboardScreen = ({ navigation }: any) => {
     // ── PE-specific back navigation ─────────────────────────────────────────
     if (isPE) {
       if (selectedStation?.name === 'Extrusion & Packaging') {
-        if (selectedSection) {
-          setSelectedSection(null);
+      if (selectedSection) {
+        setSelectedSection(null);
         } else if (selectedSubLine) {
-          setSelectedSubLine(null);
-        } else {
+        setSelectedSubLine(null);
+      } else {
           setSelectedStation(null);
         }
         return;
@@ -1732,7 +1831,7 @@ const DashboardScreen = ({ navigation }: any) => {
         if (peOutputType && getPeOutputOptions(selectedSubLine || '').length > 1) {
           setPeOutputType(null);
         } else if (selectedSubLine) {
-          setSelectedSubLine(null);
+        setSelectedSubLine(null);
           setPeOutputType(null);
         } else {
           setSelectedStation(null);
@@ -1864,8 +1963,9 @@ const DashboardScreen = ({ navigation }: any) => {
           backendShiftId ?? undefined,
         );
         if (response.data.success) {
-          setSuggestedBags(response.data.data);
-          setShowSuggestions(response.data.data.length > 0);
+          const list = normalizeSuggestedBags(response.data.data || []);
+          setSuggestedBags(list);
+          setShowSuggestions(list.length > 0);
         } else {
           setSuggestedBags([]);
           setShowSuggestions(false);
@@ -1891,8 +1991,9 @@ const DashboardScreen = ({ navigation }: any) => {
           backendShiftId ?? undefined,
         );
         if (response.data.success) { 
-          setSuggestedBags(response.data.data); 
-          setShowSuggestions(response.data.data.length > 0); 
+          const list = normalizeSuggestedBags(response.data.data || []);
+          setSuggestedBags(list);
+          setShowSuggestions(list.length > 0);
         } else {
           setSuggestedBags([]);
           setShowSuggestions(false);
@@ -1922,8 +2023,9 @@ const DashboardScreen = ({ navigation }: any) => {
         statusFilter = 'pending';
         const response = await productionApi.searchLogs(text, targetStationId, selectedStation.id, statusFilter);
         if (response.data.success) { 
-          setSuggestedBags(response.data.data); 
-          setShowSuggestions(response.data.data.length > 0); 
+          const list = normalizeSuggestedBags(response.data.data || []);
+          setSuggestedBags(list);
+          setShowSuggestions(list.length > 0);
         } else {
           setSuggestedBags([]);
           setShowSuggestions(false);
@@ -1946,8 +2048,9 @@ const DashboardScreen = ({ navigation }: any) => {
         statusFilter = 'pending';
         const response = await productionApi.searchLogs(text, targetStationId, selectedStation?.id, statusFilter);
         if (response.data.success) {
-          setSuggestedBags(response.data.data);
-          setShowSuggestions(response.data.data.length > 0);
+          const list = normalizeSuggestedBags(response.data.data || []);
+          setSuggestedBags(list);
+          setShowSuggestions(list.length > 0);
         } else {
           setSuggestedBags([]);
           setShowSuggestions(false);
@@ -1962,8 +2065,9 @@ const DashboardScreen = ({ navigation }: any) => {
       }
       const response = await productionApi.searchLogs(text, targetStationId, selectedStation?.id);
       if (response.data.success) {
-        setSuggestedBags(response.data.data);
-        setShowSuggestions(response.data.data.length > 0);
+        const list = normalizeSuggestedBags(response.data.data || []);
+        setSuggestedBags(list);
+        setShowSuggestions(list.length > 0);
       } else {
         setSuggestedBags([]);
         setShowSuggestions(false);
@@ -2125,7 +2229,7 @@ const DashboardScreen = ({ navigation }: any) => {
                   { key: 'other',     label: 'Other',                color: '#F8FAFC', accent: '#64748B', page: 1,                      setPage: () => {} },
                 ];
                 return (
-                  <View style={{ marginTop: 16 }}>
+                <View style={{ marginTop: 16 }}>
                     <Text style={[styles.sectionTitle, { marginBottom: 6 }]}>{t('dashboard.productionOutputs')}</Text>
                     <Text style={{ fontSize: 12, color: '#64748b', marginBottom: 10 }}>{t('dashboard.editAnyDataHint')}</Text>
                     {/* Search bar */}
@@ -2168,12 +2272,12 @@ const DashboardScreen = ({ navigation }: any) => {
                           </View>
                           {/* Rows */}
                           {pageRows.map((log: any) => {
-                            const st = stations.find(s => s.id === log.station_id);
-                            const stationName = st?.name ?? String(log.station_id);
+                    const st = stations.find(s => s.id === log.station_id);
+                    const stationName = st?.name ?? String(log.station_id);
                             const qr = log.output_bag_qr || log.outputBagQr || '—';
                             const sl = log.sub_line ? ` · ${log.sub_line}` : '';
                             const statusColor = log.status === 'Cancelled' ? '#ef4444' : log.status === 'pending' ? '#f59e0b' : '#22c55e';
-                            return (
+                    return (
                               <View key={log.id} style={styles.shiftLogRow}>
                                 <View style={{ flex: 1, minWidth: 0 }}>
                                   <Text style={styles.shiftLogQr} numberOfLines={1}>{qr}</Text>
@@ -2181,8 +2285,8 @@ const DashboardScreen = ({ navigation }: any) => {
                                     <Text style={styles.shiftLogMeta}>{stationName}{sl}</Text>
                                     <View style={[styles.shiftLogStatusDot, { backgroundColor: statusColor }]} />
                                     <Text style={[styles.shiftLogMeta, { color: statusColor }]}>{log.status}</Text>
-                                  </View>
-                                </View>
+                        </View>
+                          </View>
                                 <Text style={styles.shiftLogWeight}>{Number(log.weight) || 0} kg</Text>
                                 {/* Print button */}
                                 <TouchableOpacity
@@ -2195,10 +2299,10 @@ const DashboardScreen = ({ navigation }: any) => {
                                 <TouchableOpacity onPress={() => openEditLogWeight(log)} style={styles.shiftLogEditBtn}>
                                   <Pencil color="#0ea5e9" size={14} />
                                   <Text style={styles.shiftLogEditText}>Edit</Text>
-                                </TouchableOpacity>
-                              </View>
-                            );
-                          })}
+                        </TouchableOpacity>
+                      </View>
+                    );
+                  })}
                           {/* Pagination */}
                           {totalPages > 1 && (
                             <View style={styles.shiftLogPager}>
@@ -2219,7 +2323,7 @@ const DashboardScreen = ({ navigation }: any) => {
                               >
                                 <ChevronRight size={16} color={page === totalPages ? '#cbd5e1' : cat.accent} />
                               </TouchableOpacity>
-                            </View>
+                </View>
                           )}
                         </View>
                       );
@@ -2483,7 +2587,7 @@ const DashboardScreen = ({ navigation }: any) => {
                         <Text style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>{item.totalWeight} kg</Text>
                       </View>
                       <ChevronRight color="#CBD5E1" size={18} style={{ marginLeft: 6 }} />
-                    </TouchableOpacity>
+                </TouchableOpacity>
                   ))}
                   </View>
                 )}
@@ -2728,11 +2832,11 @@ const DashboardScreen = ({ navigation }: any) => {
                 </>
               ) : (
                 <>
-                  <View style={styles.activeStatus}><View style={styles.statusDot} /><Text style={styles.statusText}>{t('dashboard.shiftActive')}</Text></View>
-                  <Text style={styles.durationText}>{shiftDuration}</Text>
+              <View style={styles.activeStatus}><View style={styles.statusDot} /><Text style={styles.statusText}>{t('dashboard.shiftActive')}</Text></View>
+                <Text style={styles.durationText}>{shiftDuration}</Text>
                 </>
               )}
-            </View>
+              </View>
             <View style={styles.statsRow}>
               <View style={styles.statCard}>
                 <Text style={styles.statValue}>
@@ -2777,7 +2881,7 @@ const DashboardScreen = ({ navigation }: any) => {
               </TouchableOpacity>
             ))}
             {isShiftActive && !shiftEndedAt && (
-              <TouchableOpacity style={styles.endShiftButton} onPress={handleEndShift}><Square color="#FFF" size={20} /><Text style={styles.endShiftText}>{t('dashboard.closeShift')}</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.endShiftButton} onPress={handleEndShift}><Square color="#FFF" size={20} /><Text style={styles.endShiftText}>{t('dashboard.closeShift')}</Text></TouchableOpacity>
             )}
           </View>
         ) : (
@@ -2840,32 +2944,220 @@ const DashboardScreen = ({ navigation }: any) => {
                     </View>
 
                     {/* Step 1: Select raw material */}
-                    {!selectedSubLine && (
+                    {!selectedSubLine && (() => {
+                      const PE_RAW_MATERIALS = ['PE SUPER', 'PE 1', 'EVA SUPER', 'EVA 1'] as const;
+                      const q = peRawMaterialSearch.trim().toLowerCase();
+                      const filtered = PE_RAW_MATERIALS.filter((mat) => {
+                        const matchFilter = peRawMaterialFilter === 'all' || (peRawMaterialFilter === 'PE' && (mat === 'PE SUPER' || mat === 'PE 1')) || (peRawMaterialFilter === 'EVA' && (mat === 'EVA SUPER' || mat === 'EVA 1'));
+                        if (!matchFilter) return false;
+                        if (!q) return true;
+                        const opts = getPeOutputOptions(mat).join(' ').toLowerCase();
+                        return mat.toLowerCase().includes(q) || opts.includes(q);
+                      });
+                      return (
                       <View style={styles.selectionContainer}>
                         <Text style={styles.selectionTitle}>Select Raw Material</Text>
-                        {(['PE SUPER', 'PE 1', 'EVA SUPER', 'EVA 1'] as const).map((mat, idx) => {
-                          const colors = ['#0d9488', '#0891b2', '#7c3aed', '#db2777'];
-                          return (
-                            <TouchableOpacity key={mat} style={styles.selectionCard}
-                              onPress={() => {
-                                setSelectedSubLine(mat);
-                                // Single-output types: auto-set output type
-                                const opts = getPeOutputOptions(mat);
-                                if (opts.length === 1) setPeOutputType(opts[0]);
-                                else setPeOutputType(null);
-                              }}>
-                              <View style={[styles.selectionIconBox, { backgroundColor: colors[idx] }]}>
-                                <Package color="#FFF" size={28} />
-                              </View>
-                              <View style={styles.selectionText}>
-                                <Text style={styles.selectionCardTitle}>{mat}</Text>
-                                <Text style={styles.selectionCardSub}>{getPeOutputOptions(mat).join(' / ')}</Text>
-                              </View>
-                              <ChevronRight color="#CCC" size={24} />
+                        <View style={[styles.shiftLogsSearchBar, { marginHorizontal: 0, marginBottom: 10 }]}>
+                          <Search size={16} color="#94a3b8" />
+                          <TextInput
+                            style={styles.shiftLogsSearchInput}
+                            placeholder="Search raw material..."
+                            placeholderTextColor="#94a3b8"
+                            value={peRawMaterialSearch}
+                            onChangeText={setPeRawMaterialSearch}
+                            returnKeyType="search"
+                          />
+                          {peRawMaterialSearch !== '' && (
+                            <TouchableOpacity onPress={() => setPeRawMaterialSearch('')}>
+                              <X size={16} color="#94a3b8" />
                             </TouchableOpacity>
-                          );
-                        })}
+                          )}
+                        </View>
+                        <View style={styles.filterButtons}>
+                          <TouchableOpacity
+                            style={[styles.filterButton, peRawMaterialFilter === 'all' && styles.filterButtonActive]}
+                            onPress={() => setPeRawMaterialFilter('all')}
+                          >
+                            <Text style={[styles.filterButtonText, peRawMaterialFilter === 'all' && styles.filterButtonTextActive]}>All</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={[styles.filterButton, peRawMaterialFilter === 'PE' && styles.filterButtonActive]}
+                            onPress={() => setPeRawMaterialFilter('PE')}
+                          >
+                            <Text style={[styles.filterButtonText, peRawMaterialFilter === 'PE' && styles.filterButtonTextActive]}>PE</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={[styles.filterButton, peRawMaterialFilter === 'EVA' && styles.filterButtonActive]}
+                            onPress={() => setPeRawMaterialFilter('EVA')}
+                          >
+                            <Text style={[styles.filterButtonText, peRawMaterialFilter === 'EVA' && styles.filterButtonTextActive]}>EVA</Text>
+                          </TouchableOpacity>
+                        </View>
+                        {/* List below subline */}
+                        <View style={styles.peRawMaterialListContainer}>
+                          <Text style={styles.peRawMaterialListLabel}>Raw materials</Text>
+                          {filtered.length === 0 ? (
+                            <View style={[styles.grayEmptyBox, { marginTop: 8 }]}>
+                              <Text style={styles.grayEmptyText}>No raw material matches search or filter</Text>
+                            </View>
+                          ) : (
+                            <ScrollView style={styles.peRawMaterialList} showsVerticalScrollIndicator={false} nestedScrollEnabled>
+                              {filtered.map((mat, idx) => {
+                                const colors = ['#0d9488', '#0891b2', '#7c3aed', '#db2777'];
+                                const colorIdx = PE_RAW_MATERIALS.indexOf(mat);
+                                return (
+                                  <TouchableOpacity key={mat} style={styles.selectionCard}
+                                    onPress={() => {
+                                      setSelectedSubLine(mat);
+                                      const opts = getPeOutputOptions(mat);
+                                      if (opts.length === 1) setPeOutputType(opts[0]);
+                                      else setPeOutputType(null);
+                                    }}>
+                                    <View style={[styles.selectionIconBox, { backgroundColor: colors[colorIdx] }]}>
+                                      <Package color="#FFF" size={28} />
+                                    </View>
+                                    <View style={styles.selectionText}>
+                                      <Text style={styles.selectionCardTitle}>{mat}</Text>
+                                      <Text style={styles.selectionCardSub}>{getPeOutputOptions(mat).join(' / ')}</Text>
+                                    </View>
+                                    <ChevronRight color="#CCC" size={24} />
+                                  </TouchableOpacity>
+                                );
+                              })}
+                            </ScrollView>
+                          )}
+                        </View>
                       </View>
+                      );
+                    })()}
+
+                    {/* Recent Entries list only when no raw material selected (not in subline) */}
+                    {selectedStation?.name === 'Crusher' && !selectedSubLine && (
+                    <View style={[styles.crusherLogsSection, { marginHorizontal: 16, marginBottom: 24 }]}>
+                      <View style={styles.logsHeader}>
+                        <Text style={styles.logsTitle}>Recent Entries</Text>
+                      </View>
+                      <View style={styles.datePickerContainer}>
+                        <Text style={styles.datePickerLabel}>Select Date:</Text>
+                        <StationDatePicker
+                          value={parseDateLocal(peCrusherSelectedDate)}
+                          onChange={(date) => { setPeCrusherSelectedDate(formatDateLocal(date)); setPeCrusherCurrentPage(1); }}
+                          maximumDate={maxDate}
+                        />
+                      </View>
+                      <View style={styles.searchBox}>
+                        <Search size={18} color="#64748b" />
+                        <TextInput
+                          style={styles.searchInput}
+                          placeholder="Search by QR code..."
+                          value={peCrusherSearchQuery}
+                          onChangeText={(text) => { setPeCrusherSearchQuery(text); setPeCrusherCurrentPage(1); }}
+                          placeholderTextColor="#94a3b8"
+                          returnKeyType="search"
+                          autoCorrect={false}
+                          autoCapitalize="none"
+                          spellCheck={false}
+                        />
+                        {peCrusherSearchQuery.length > 0 && (
+                          <TouchableOpacity onPress={() => { setPeCrusherSearchQuery(''); setPeCrusherCurrentPage(1); }} style={styles.clearButton}>
+                            <X size={16} color="#64748b" />
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                      <View style={styles.filtersContainer}>
+                        <View style={styles.filterGroup}>
+                          <Text style={styles.filterLabel}>Line:</Text>
+                          <View style={styles.filterButtons}>
+                            <TouchableOpacity style={[styles.filterButton, peCrusherLineFilter === 'all' && styles.filterButtonActive]} onPress={() => { setPeCrusherLineFilter('all'); setPeCrusherCurrentPage(1); }}>
+                              <Text style={[styles.filterButtonText, peCrusherLineFilter === 'all' && styles.filterButtonTextActive]}>All</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.filterButton, peCrusherLineFilter === 'PE SUPER' && styles.filterButtonActive]} onPress={() => { setPeCrusherLineFilter('PE SUPER'); setPeCrusherCurrentPage(1); }}>
+                              <Text style={[styles.filterButtonText, peCrusherLineFilter === 'PE SUPER' && styles.filterButtonTextActive]}>PE SUPER</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.filterButton, peCrusherLineFilter === 'PE 1' && styles.filterButtonActive]} onPress={() => { setPeCrusherLineFilter('PE 1'); setPeCrusherCurrentPage(1); }}>
+                              <Text style={[styles.filterButtonText, peCrusherLineFilter === 'PE 1' && styles.filterButtonTextActive]}>PE 1</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.filterButton, peCrusherLineFilter === 'EVA SUPER' && styles.filterButtonActive]} onPress={() => { setPeCrusherLineFilter('EVA SUPER'); setPeCrusherCurrentPage(1); }}>
+                              <Text style={[styles.filterButtonText, peCrusherLineFilter === 'EVA SUPER' && styles.filterButtonTextActive]}>EVA SUPER</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.filterButton, peCrusherLineFilter === 'EVA 1' && styles.filterButtonActive]} onPress={() => { setPeCrusherLineFilter('EVA 1'); setPeCrusherCurrentPage(1); }}>
+                              <Text style={[styles.filterButtonText, peCrusherLineFilter === 'EVA 1' && styles.filterButtonTextActive]}>EVA 1</Text>
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                        <View style={styles.filterGroup}>
+                          <Text style={styles.filterLabel}>Status:</Text>
+                          <View style={styles.filterButtons}>
+                            <TouchableOpacity style={[styles.filterButton, peCrusherStatusFilter === 'all' && styles.filterButtonActive]} onPress={() => { setPeCrusherStatusFilter('all'); setPeCrusherCurrentPage(1); }}>
+                              <Text style={[styles.filterButtonText, peCrusherStatusFilter === 'all' && styles.filterButtonTextActive]}>All</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.filterButton, peCrusherStatusFilter === 'pending' && styles.filterButtonActive]} onPress={() => { setPeCrusherStatusFilter('pending'); setPeCrusherCurrentPage(1); }}>
+                              <Text style={[styles.filterButtonText, peCrusherStatusFilter === 'pending' && styles.filterButtonTextActive]}>Pending</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.filterButton, peCrusherStatusFilter === 'Completed' && styles.filterButtonActive]} onPress={() => { setPeCrusherStatusFilter('Completed'); setPeCrusherCurrentPage(1); }}>
+                              <Text style={[styles.filterButtonText, peCrusherStatusFilter === 'Completed' && styles.filterButtonTextActive]}>Complete</Text>
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                      </View>
+                      {peCrusherLogsLoading ? (
+                        <View style={styles.loadingState}>
+                          <ActivityIndicator size="large" color="#17a34a" />
+                          <Text style={styles.loadingText}>Loading entries...</Text>
+                        </View>
+                      ) : peCrusherLogs.length > 0 ? (
+                        <View style={styles.logsList}>
+                          {peCrusherLogs.map((log: any, index: number) => (
+                            <View key={log.id || index} style={styles.logItem}>
+                              <View style={styles.logMain}>
+                                <Text style={styles.logQr}>{log.output_bag_qr || log.outputBagQr || '—'}</Text>
+                                <View style={styles.logDetails}>
+                                  <Text style={styles.logWeight}>{log.weight} kg</Text>
+                                  <Text style={styles.logTime}>{new Date(log.created_at).toLocaleString()}</Text>
+                                </View>
+                                <View style={styles.logStatusRow}>
+                                  <View style={[styles.statusBadge, { backgroundColor: log.status === 'pending' ? '#FEF3C7' : '#DCFCE7' }]}>
+                                    <Text style={[styles.statusBadgeText, { color: log.status === 'pending' ? '#D97706' : '#15803D' }]}>{log.status || 'Completed'}</Text>
+                                  </View>
+                                </View>
+                              </View>
+                              <View style={styles.logActions}>
+                                {(user?.role?.toLowerCase() === 'ppic' || log.status === 'pending') && (
+                                  <TouchableOpacity style={styles.editIconButton} onPress={() => openEditLogWeight(log)}>
+                                    <Pencil color="#0ea5e9" size={18} />
+                                  </TouchableOpacity>
+                                )}
+                                <TouchableOpacity style={styles.printIconButton} onPress={() => { setSelectedLogForPrint(log); setShowListPrintPreview(true); }}>
+                                  <PrinterIcon color="#17a34a" size={20} />
+                                </TouchableOpacity>
+                                <View style={[styles.logBadge, { backgroundColor: '#CCFBF1' }]}>
+                                  <Text style={[styles.logBadgeText, { color: '#0d9488' }]}>{log.sub_line || '—'}</Text>
+                                </View>
+                              </View>
+                            </View>
+                          ))}
+                        </View>
+                      ) : (
+                        <View style={styles.emptyState}>
+                          <Package size={48} color="#94a3b8" opacity={0.5} />
+                          <Text style={styles.emptyText}>No entries found for this date</Text>
+                        </View>
+                      )}
+                      {peCrusherTotalPages > 1 && (
+                        <View style={styles.pagination}>
+                          <TouchableOpacity style={[styles.pageBtn, peCrusherCurrentPage === 1 && styles.pageBtnDisabled]} onPress={() => setPeCrusherCurrentPage(Math.max(1, peCrusherCurrentPage - 1))} disabled={peCrusherCurrentPage === 1}>
+                            <ChevronLeft color={peCrusherCurrentPage === 1 ? '#cbd5e1' : '#475569'} size={18} />
+                          </TouchableOpacity>
+                          <View style={styles.pageInfoBox}>
+                            <Text style={styles.pageInfoMain}>{peCrusherCurrentPage} / {peCrusherTotalPages}</Text>
+                            <Text style={styles.pageInfoSub}>{peCrusherTotalLogs} total</Text>
+                          </View>
+                          <TouchableOpacity style={[styles.pageBtn, peCrusherCurrentPage === peCrusherTotalPages && styles.pageBtnDisabled]} onPress={() => setPeCrusherCurrentPage(Math.min(peCrusherTotalPages, peCrusherCurrentPage + 1))} disabled={peCrusherCurrentPage === peCrusherTotalPages}>
+                            <ChevronRight color={peCrusherCurrentPage === peCrusherTotalPages ? '#cbd5e1' : '#475569'} size={18} />
+                          </TouchableOpacity>
+                        </View>
+                      )}
+                    </View>
                     )}
 
                     {/* Step 2: Select output type (only when multiple options exist) */}
@@ -3008,7 +3300,7 @@ const DashboardScreen = ({ navigation }: any) => {
                       <View style={styles.selectionText}>
                         <Text style={styles.selectionCardTitle}>3E</Text>
                         <Text style={styles.selectionCardSub}>{t('dashboard.primaryCrusherLine')}</Text>
-                      </View>
+                    </View>
                       <View style={{ alignItems: 'flex-end', marginRight: 8 }}>
                         <Text style={{ fontSize: 13, fontWeight: '700', color: '#1e293b' }}>
                           {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === '3E').length} bags
@@ -3016,7 +3308,7 @@ const DashboardScreen = ({ navigation }: any) => {
                         <Text style={{ fontSize: 11, color: '#64748b' }}>
                           {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === '3E').reduce((s: number, l: any) => s + (parseFloat(l.weight) || 0), 0).toFixed(1)} kg
                         </Text>
-                      </View>
+                    </View>
                       <ChevronRight color="#CCC" size={24} />
                     </TouchableOpacity>
                     <TouchableOpacity style={[styles.selectionCard, isShiftEnded && { opacity: 0.4 }]} disabled={isShiftEnded} onPress={() => setSelectedSubLine('Rapid')}>
@@ -3024,7 +3316,7 @@ const DashboardScreen = ({ navigation }: any) => {
                       <View style={styles.selectionText}>
                         <Text style={styles.selectionCardTitle}>Rapid</Text>
                         <Text style={styles.selectionCardSub}>{t('dashboard.fastProcessingLine')}</Text>
-                      </View>
+                  </View>
                       <View style={{ alignItems: 'flex-end', marginRight: 8 }}>
                         <Text style={{ fontSize: 13, fontWeight: '700', color: '#1e293b' }}>
                           {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === 'Rapid').length} bags
@@ -3032,7 +3324,7 @@ const DashboardScreen = ({ navigation }: any) => {
                         <Text style={{ fontSize: 11, color: '#64748b' }}>
                           {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === 'Rapid').reduce((s: number, l: any) => s + (parseFloat(l.weight) || 0), 0).toFixed(1)} kg
                         </Text>
-                      </View>
+                  </View>
                       <ChevronRight color="#CCC" size={24} />
                     </TouchableOpacity>
                     <TouchableOpacity style={[styles.selectionCard, isShiftEnded && { opacity: 0.4 }]} disabled={isShiftEnded} onPress={() => setSelectedSubLine('Betty')}>
@@ -3040,7 +3332,7 @@ const DashboardScreen = ({ navigation }: any) => {
                       <View style={styles.selectionText}>
                         <Text style={styles.selectionCardTitle}>Betty</Text>
                         <Text style={styles.selectionCardSub}>{t('dashboard.bettyMachineLine')}</Text>
-                      </View>
+                  </View>
                       <View style={{ alignItems: 'flex-end', marginRight: 8 }}>
                         <Text style={{ fontSize: 13, fontWeight: '700', color: '#1e293b' }}>
                           {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === 'Betty').length} bags
@@ -3048,7 +3340,7 @@ const DashboardScreen = ({ navigation }: any) => {
                         <Text style={{ fontSize: 11, color: '#64748b' }}>
                           {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === 'Betty').reduce((s: number, l: any) => s + (parseFloat(l.weight) || 0), 0).toFixed(1)} kg
                         </Text>
-                      </View>
+                  </View>
                       <ChevronRight color="#CCC" size={24} />
                     </TouchableOpacity>
 
@@ -3251,7 +3543,7 @@ const DashboardScreen = ({ navigation }: any) => {
                                 >
                                   <PrinterIcon color="#17a34a" size={20} />
                                 </TouchableOpacity>
-                                <View style={[styles.logBadge, {
+                                <View style={[styles.logBadge, { 
                                   backgroundColor: log.sub_line === '3E' ? '#EBF5FF' : log.sub_line === 'Rapid' ? '#F5F3FF' : '#D1FAE5',
                                 }]}>
                                   <Text style={[styles.logBadgeText, { 
@@ -3272,24 +3564,24 @@ const DashboardScreen = ({ navigation }: any) => {
                       {/* Pagination */}
                       {totalPages > 1 && (
                         <View style={styles.pagination}>
-                          <TouchableOpacity
+                      <TouchableOpacity 
                             style={[styles.pageBtn, currentPage === 1 && styles.pageBtnDisabled]}
                             onPress={() => setCurrentPage(Math.max(1, currentPage - 1))}
                             disabled={currentPage === 1}
                           >
                             <ChevronLeft color={currentPage === 1 ? '#cbd5e1' : '#475569'} size={18} />
-                          </TouchableOpacity>
+                      </TouchableOpacity>
                           <View style={styles.pageInfoBox}>
                             <Text style={styles.pageInfoMain}>{currentPage} / {totalPages}</Text>
                             <Text style={styles.pageInfoSub}>{totalLogs} total</Text>
                           </View>
-                          <TouchableOpacity
+                      <TouchableOpacity 
                             style={[styles.pageBtn, currentPage === totalPages && styles.pageBtnDisabled]}
                             onPress={() => setCurrentPage(Math.min(totalPages, currentPage + 1))}
                             disabled={currentPage === totalPages}
                           >
                             <ChevronRight color={currentPage === totalPages ? '#cbd5e1' : '#475569'} size={18} />
-                          </TouchableOpacity>
+                      </TouchableOpacity>
                         </View>
                       )}
                     </View>
@@ -3367,8 +3659,8 @@ const DashboardScreen = ({ navigation }: any) => {
                                   style={[styles.suggestionItem, i === suggestedBags.length - 1 && { borderBottomWidth: 0 }]}
                                   onPress={() => { setSelectedInputBag(bag); setShowSuggestions(false); setBagSearchQuery(''); }}
                                 >
-                                  <View style={{ flex: 1 }}>
-                                    <Text style={styles.suggestionId}>{bag.output_bag_qr}</Text>
+                                  <View style={styles.suggestionLeftCol}>
+                                    <Text style={styles.suggestionId} numberOfLines={2} selectable>{getBagDisplayId(bag)}</Text>
                                     {bag.sub_line ? <Text style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>{bag.sub_line}</Text> : null}
                                   </View>
                                   <Text style={styles.suggestionDetail}>{bag.weight} kg</Text>
@@ -3387,8 +3679,10 @@ const DashboardScreen = ({ navigation }: any) => {
                         {/* Selected bag preview */}
                         {selectedInputBag && (
                           <View style={styles.selectedBagCard}>
-                            <View style={{ flex: 1 }}>
-                              <Text style={styles.selectedBagId}>{selectedInputBag.output_bag_qr}</Text>
+                            <View style={{ flex: 1, minWidth: 0 }}>
+                              <Text style={{ fontSize: 11, color: '#64748b', marginBottom: 2 }}>{t('dashboard.jumboId')}</Text>
+                              <Text style={[styles.selectedBagId, { minWidth: 0 }]} numberOfLines={2} selectable>{getBagDisplayId(selectedInputBag)}</Text>
+                              {(selectedInputBag as any).sub_line ? <Text style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>{t('dashboard.lineLabel')}: {(selectedInputBag as any).sub_line}</Text> : null}
                               <Text style={styles.selectedBagWeight}>{selectedInputBag.weight} kg</Text>
                             </View>
                             <TouchableOpacity onPress={() => setSelectedInputBag(null)}>
@@ -3436,8 +3730,8 @@ const DashboardScreen = ({ navigation }: any) => {
                         <TouchableOpacity style={[styles.secondaryButton, { marginTop: 8 }]} onPress={() => { setSelectedSection(null); setSelectedInputBag(null); }}>
                           <Text style={styles.secondaryButtonText}>← Back</Text>
                         </TouchableOpacity>
-                      </View>
-                    ) : (
+                    </View>
+                  ) : (
                       /* ── Betty OUTPUT: same form as 3E / Rapid ── */
                       <>
                         {isShiftEnded ? (
@@ -3748,9 +4042,9 @@ const DashboardScreen = ({ navigation }: any) => {
                       );
                     })()}
                     <View style={[styles.crusherLogsSection, { marginTop: 8 }]}>
-                      <View style={styles.logsHeader}>
-                        <Text style={styles.logsTitle}>Recent Entries</Text>
-                      </View>
+                    <View style={styles.logsHeader}>
+                      <Text style={styles.logsTitle}>Recent Entries</Text>
+                    </View>
 
                     {/* Date Picker */}
                     <View style={styles.datePickerContainer}>
@@ -3911,7 +4205,7 @@ const DashboardScreen = ({ navigation }: any) => {
                     {/* Pagination */}
                     {washingTotalPages > 1 && (
                       <View style={styles.pagination}>
-                        <TouchableOpacity
+                        <TouchableOpacity 
                           style={[styles.pageBtn, washingCurrentPage === 1 && styles.pageBtnDisabled]}
                           onPress={() => washingCurrentPage > 1 && setWashingCurrentPage(washingCurrentPage - 1)}
                           disabled={washingCurrentPage === 1}
@@ -3922,7 +4216,7 @@ const DashboardScreen = ({ navigation }: any) => {
                           <Text style={styles.pageInfoMain}>{washingCurrentPage} / {washingTotalPages}</Text>
                           <Text style={styles.pageInfoSub}>{washingTotalLogs} total</Text>
                         </View>
-                        <TouchableOpacity
+                        <TouchableOpacity 
                           style={[styles.pageBtn, washingCurrentPage === washingTotalPages && styles.pageBtnDisabled]}
                           onPress={() => washingCurrentPage < washingTotalPages && setWashingCurrentPage(washingCurrentPage + 1)}
                           disabled={washingCurrentPage === washingTotalPages}
@@ -3963,8 +4257,8 @@ const DashboardScreen = ({ navigation }: any) => {
                         {showSuggestions && (
                           <ScrollView style={styles.suggestionsList} keyboardShouldPersistTaps="handled" nestedScrollEnabled>
                             {suggestedBags.map((bag, i) => (
-                              <TouchableOpacity
-                                key={i}
+                              <TouchableOpacity 
+                                key={i} 
                                 style={[styles.suggestionItem, i === suggestedBags.length - 1 && { borderBottomWidth: 0 }]}
                                 onPress={() => {
                                   setSelectedInputBag(bag);
@@ -3972,8 +4266,8 @@ const DashboardScreen = ({ navigation }: any) => {
                                   setBagSearchQuery('');
                                 }}
                               >
-                                <View style={{ flex: 1 }}>
-                                  <Text style={styles.suggestionId}>{bag.output_bag_qr}</Text>
+                                <View style={styles.suggestionLeftCol}>
+                                <Text style={styles.suggestionId} numberOfLines={2} selectable>{getBagDisplayId(bag)}</Text>
                                   {bag.sub_line ? <Text style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>{bag.sub_line}</Text> : null}
                                 </View>
                                 <Text style={styles.suggestionDetail}>{bag.weight} kg</Text>
@@ -3988,8 +4282,10 @@ const DashboardScreen = ({ navigation }: any) => {
                       </TouchableOpacity>
                       {selectedInputBag && (
                         <View style={styles.selectedBagCard}>
-                          <View style={{ flex: 1 }}>
-                            <Text style={styles.selectedBagId}>{selectedInputBag.output_bag_qr}</Text>
+                          <View style={{ flex: 1, minWidth: 0 }}>
+                            <Text style={{ fontSize: 11, color: '#64748b', marginBottom: 2 }}>{t('dashboard.jumboId')}</Text>
+                            <Text style={[styles.selectedBagId, { minWidth: 0 }]} numberOfLines={2} selectable>{getBagDisplayId(selectedInputBag)}</Text>
+                            {(selectedInputBag as any).sub_line ? <Text style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>{t('dashboard.lineLabel')}: {(selectedInputBag as any).sub_line}</Text> : null}
                             <Text style={styles.selectedBagWeight}>{selectedInputBag.weight} kg</Text>
                           </View>
                           <TouchableOpacity onPress={() => setSelectedInputBag(null)}>
@@ -4192,7 +4488,7 @@ const DashboardScreen = ({ navigation }: any) => {
 
                     {/* Step 1: Select product line — all 4 outputs, sellable marker shown */}
                     {!selectedSubLine && (
-                      <View style={styles.selectionContainer}>
+                    <View style={styles.selectionContainer}>
                         <Text style={styles.selectionTitle}>Select Output Product Line</Text>
                         {([
                           { line: 'Pellet PE SUPER',  primary: 'Flakes PE SUPER',  color: '#f97316', sellable: true  },
@@ -4206,7 +4502,7 @@ const DashboardScreen = ({ navigation }: any) => {
                             <View style={[styles.selectionIconBox, { backgroundColor: color }]}>
                               <Zap color="#FFF" size={28} />
                             </View>
-                            <View style={styles.selectionText}>
+                        <View style={styles.selectionText}>
                               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                                 <Text style={styles.selectionCardTitle}>{line}</Text>
                                 {sellable && (
@@ -4224,11 +4520,140 @@ const DashboardScreen = ({ navigation }: any) => {
                               <Text style={{ fontSize: 11, color: '#64748b' }}>
                                 {shiftLogs.filter((l: any) => l.station_id === selectedStation.id && l.sub_line === line).reduce((s: number, l: any) => s + (parseFloat(l.weight) || 0), 0).toFixed(1)} kg
                               </Text>
-                            </View>
-                            <ChevronRight color="#CCC" size={24} />
-                          </TouchableOpacity>
+                        </View>
+                        <ChevronRight color="#CCC" size={24} />
+                      </TouchableOpacity>
                         ))}
                       </View>
+                    )}
+
+                    {/* Recent Entries list for PE Extrusion (only when no product line selected) */}
+                    {!selectedSubLine && (
+                    <View style={[styles.crusherLogsSection, { marginHorizontal: 16, marginBottom: 24 }]}>
+                      <View style={styles.logsHeader}>
+                        <Text style={styles.logsTitle}>Recent Entries</Text>
+                      </View>
+                      <View style={styles.datePickerContainer}>
+                        <Text style={styles.datePickerLabel}>Select Date:</Text>
+                        <StationDatePicker
+                          value={parseDateLocal(peExtrusionSelectedDate)}
+                          onChange={(date) => { setPeExtrusionSelectedDate(formatDateLocal(date)); setPeExtrusionCurrentPage(1); }}
+                          maximumDate={maxDate}
+                        />
+                      </View>
+                      <View style={styles.searchBox}>
+                        <Search size={18} color="#64748b" />
+                        <TextInput
+                          style={styles.searchInput}
+                          placeholder="Search by QR code..."
+                          value={peExtrusionSearchQuery}
+                          onChangeText={(text) => { setPeExtrusionSearchQuery(text); setPeExtrusionCurrentPage(1); }}
+                          placeholderTextColor="#94a3b8"
+                          returnKeyType="search"
+                          autoCorrect={false}
+                          autoCapitalize="none"
+                          spellCheck={false}
+                        />
+                        {peExtrusionSearchQuery.length > 0 && (
+                          <TouchableOpacity onPress={() => { setPeExtrusionSearchQuery(''); setPeExtrusionCurrentPage(1); }} style={styles.clearButton}>
+                            <X size={16} color="#64748b" />
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                      <View style={styles.filtersContainer}>
+                        <View style={styles.filterGroup}>
+                          <Text style={styles.filterLabel}>Line:</Text>
+                          <View style={styles.filterButtons}>
+                            <TouchableOpacity style={[styles.filterButton, peExtrusionLineFilter === 'all' && styles.filterButtonActive]} onPress={() => { setPeExtrusionLineFilter('all'); setPeExtrusionCurrentPage(1); }}>
+                              <Text style={[styles.filterButtonText, peExtrusionLineFilter === 'all' && styles.filterButtonTextActive]}>All</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.filterButton, peExtrusionLineFilter === 'Pellet PE SUPER' && styles.filterButtonActive]} onPress={() => { setPeExtrusionLineFilter('Pellet PE SUPER'); setPeExtrusionCurrentPage(1); }}>
+                              <Text style={[styles.filterButtonText, peExtrusionLineFilter === 'Pellet PE SUPER' && styles.filterButtonTextActive]}>Pellet PE SUPER</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.filterButton, peExtrusionLineFilter === 'Pellet PE 1' && styles.filterButtonActive]} onPress={() => { setPeExtrusionLineFilter('Pellet PE 1'); setPeExtrusionCurrentPage(1); }}>
+                              <Text style={[styles.filterButtonText, peExtrusionLineFilter === 'Pellet PE 1' && styles.filterButtonTextActive]}>Pellet PE 1</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.filterButton, peExtrusionLineFilter === 'Pellet EVA SUPER' && styles.filterButtonActive]} onPress={() => { setPeExtrusionLineFilter('Pellet EVA SUPER'); setPeExtrusionCurrentPage(1); }}>
+                              <Text style={[styles.filterButtonText, peExtrusionLineFilter === 'Pellet EVA SUPER' && styles.filterButtonTextActive]}>Pellet EVA SUPER</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.filterButton, peExtrusionLineFilter === 'Pellet EVA 1' && styles.filterButtonActive]} onPress={() => { setPeExtrusionLineFilter('Pellet EVA 1'); setPeExtrusionCurrentPage(1); }}>
+                              <Text style={[styles.filterButtonText, peExtrusionLineFilter === 'Pellet EVA 1' && styles.filterButtonTextActive]}>Pellet EVA 1</Text>
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                        <View style={styles.filterGroup}>
+                          <Text style={styles.filterLabel}>Status:</Text>
+                          <View style={styles.filterButtons}>
+                            <TouchableOpacity style={[styles.filterButton, peExtrusionStatusFilter === 'all' && styles.filterButtonActive]} onPress={() => { setPeExtrusionStatusFilter('all'); setPeExtrusionCurrentPage(1); }}>
+                              <Text style={[styles.filterButtonText, peExtrusionStatusFilter === 'all' && styles.filterButtonTextActive]}>All</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.filterButton, peExtrusionStatusFilter === 'pending' && styles.filterButtonActive]} onPress={() => { setPeExtrusionStatusFilter('pending'); setPeExtrusionCurrentPage(1); }}>
+                              <Text style={[styles.filterButtonText, peExtrusionStatusFilter === 'pending' && styles.filterButtonTextActive]}>Pending</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.filterButton, peExtrusionStatusFilter === 'Completed' && styles.filterButtonActive]} onPress={() => { setPeExtrusionStatusFilter('Completed'); setPeExtrusionCurrentPage(1); }}>
+                              <Text style={[styles.filterButtonText, peExtrusionStatusFilter === 'Completed' && styles.filterButtonTextActive]}>Complete</Text>
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                      </View>
+                      {peExtrusionLogsLoading ? (
+                        <View style={styles.loadingState}>
+                          <ActivityIndicator size="large" color="#17a34a" />
+                          <Text style={styles.loadingText}>Loading entries...</Text>
+                        </View>
+                      ) : peExtrusionLogs.length > 0 ? (
+                        <View style={styles.logsList}>
+                          {peExtrusionLogs.map((log: any, index: number) => (
+                            <View key={log.id || index} style={styles.logItem}>
+                              <View style={styles.logMain}>
+                                <Text style={styles.logQr}>{log.output_bag_qr || log.outputBagQr || '—'}</Text>
+                                <View style={styles.logDetails}>
+                                  <Text style={styles.logWeight}>{log.weight} kg</Text>
+                                  <Text style={styles.logTime}>{new Date(log.created_at).toLocaleString()}</Text>
+                                </View>
+                                <View style={styles.logStatusRow}>
+                                  <View style={[styles.statusBadge, { backgroundColor: log.status === 'pending' ? '#FEF3C7' : '#DCFCE7' }]}>
+                                    <Text style={[styles.statusBadgeText, { color: log.status === 'pending' ? '#D97706' : '#15803D' }]}>{log.status || 'Completed'}</Text>
+                                  </View>
+                                </View>
+                              </View>
+                              <View style={styles.logActions}>
+                                {(user?.role?.toLowerCase() === 'ppic' || log.status === 'pending') && (
+                                  <TouchableOpacity style={styles.editIconButton} onPress={() => openEditLogWeight(log)}>
+                                    <Pencil color="#0ea5e9" size={18} />
+                                  </TouchableOpacity>
+                                )}
+                                <TouchableOpacity style={styles.printIconButton} onPress={() => { setSelectedLogForPrint(log); setShowListPrintPreview(true); }}>
+                                  <PrinterIcon color="#17a34a" size={20} />
+                                </TouchableOpacity>
+                                <View style={[styles.logBadge, { backgroundColor: '#FFF7ED' }]}>
+                                  <Text style={[styles.logBadgeText, { color: '#ea580c' }]}>{log.sub_line || '—'}</Text>
+                                </View>
+                              </View>
+                            </View>
+                          ))}
+                        </View>
+                      ) : (
+                        <View style={styles.emptyState}>
+                          <Package size={48} color="#94a3b8" opacity={0.5} />
+                          <Text style={styles.emptyText}>No entries found for this date</Text>
+                        </View>
+                      )}
+                      {peExtrusionTotalPages > 1 && (
+                        <View style={styles.pagination}>
+                          <TouchableOpacity style={[styles.pageBtn, peExtrusionCurrentPage === 1 && styles.pageBtnDisabled]} onPress={() => setPeExtrusionCurrentPage(Math.max(1, peExtrusionCurrentPage - 1))} disabled={peExtrusionCurrentPage === 1}>
+                            <ChevronLeft color={peExtrusionCurrentPage === 1 ? '#cbd5e1' : '#475569'} size={18} />
+                          </TouchableOpacity>
+                          <View style={styles.pageInfoBox}>
+                            <Text style={styles.pageInfoMain}>{peExtrusionCurrentPage} / {peExtrusionTotalPages}</Text>
+                            <Text style={styles.pageInfoSub}>{peExtrusionTotalLogs} total</Text>
+                          </View>
+                          <TouchableOpacity style={[styles.pageBtn, peExtrusionCurrentPage === peExtrusionTotalPages && styles.pageBtnDisabled]} onPress={() => setPeExtrusionCurrentPage(Math.min(peExtrusionTotalPages, peExtrusionCurrentPage + 1))} disabled={peExtrusionCurrentPage === peExtrusionTotalPages}>
+                            <ChevronRight color={peExtrusionCurrentPage === peExtrusionTotalPages ? '#cbd5e1' : '#475569'} size={18} />
+                          </TouchableOpacity>
+                        </View>
+                      )}
+                    </View>
                     )}
 
                     {/* Step 2: Input / Output section picker */}
@@ -4245,23 +4670,23 @@ const DashboardScreen = ({ navigation }: any) => {
                           <View style={[styles.selectionIconBox, { backgroundColor: '#0ea5e9' }]}>
                             <Package color="#FFF" size={28} />
                           </View>
-                          <View style={styles.selectionText}>
+                        <View style={styles.selectionText}>
                             <Text style={styles.selectionCardTitle}>Input</Text>
                             <Text style={styles.selectionCardSub}>Scan primary flakes bag</Text>
-                          </View>
-                          <ChevronRight color="#CCC" size={24} />
-                        </TouchableOpacity>
+                        </View>
+                        <ChevronRight color="#CCC" size={24} />
+                      </TouchableOpacity>
                         <TouchableOpacity style={styles.selectionCard}
                           onPress={() => setSelectedSection('output')}>
                           <View style={[styles.selectionIconBox, { backgroundColor: '#22c55e' }]}>
                             <Box color="#FFF" size={28} />
                           </View>
-                          <View style={styles.selectionText}>
+                        <View style={styles.selectionText}>
                             <Text style={styles.selectionCardTitle}>Output</Text>
                             <Text style={styles.selectionCardSub}>Enter weight & generate QR</Text>
-                          </View>
-                          <ChevronRight color="#CCC" size={24} />
-                        </TouchableOpacity>
+                        </View>
+                        <ChevronRight color="#CCC" size={24} />
+                      </TouchableOpacity>
                       </View>
                     )}
 
@@ -4288,8 +4713,10 @@ const DashboardScreen = ({ navigation }: any) => {
                           </View>
                           {selectedInputBag ? (
                             <View style={styles.selectedBagCard}>
-                              <View style={styles.selectedBagInfo}>
-                                <Text style={styles.selectedBagQr}>{selectedInputBag.output_bag_qr}</Text>
+                              <View style={[styles.selectedBagInfo, { flex: 1, minWidth: 0 }]}>
+                                <Text style={{ fontSize: 11, color: '#64748b', marginBottom: 2 }}>{t('dashboard.jumboId')}</Text>
+                                <Text style={[styles.selectedBagQr, { minWidth: 0 }]} numberOfLines={2} selectable>{getBagDisplayId(selectedInputBag)}</Text>
+                                {(selectedInputBag as any).sub_line ? <Text style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>{t('dashboard.lineLabel')}: {(selectedInputBag as any).sub_line}</Text> : null}
                                 <Text style={styles.selectedBagWeight}>{selectedInputBag.weight} kg</Text>
                               </View>
                               <TouchableOpacity onPress={() => setSelectedInputBag(null)}>
@@ -4318,13 +4745,13 @@ const DashboardScreen = ({ navigation }: any) => {
                                       key={idx}
                                       style={[styles.suggestionItem, idx === suggestedBags.length - 1 && { borderBottomWidth: 0 }]}
                                       onPress={() => {
-                                        setSelectedInputBag({ output_bag_qr: bag.output_bag_qr, weight: bag.weight });
+                                        setSelectedInputBag({ ...bag, output_bag_qr: bag.output_bag_qr ?? bag.outputBagQr, weight: bag.weight });
                                         setSuggestedBags([]);
                                         setShowSuggestions(false);
                                         setBagSearchQuery('');
                                       }}>
-                                      <View style={{ flex: 1 }}>
-                                        <Text style={styles.suggestionId}>{bag.output_bag_qr}</Text>
+                                      <View style={styles.suggestionLeftCol}>
+                                        <Text style={styles.suggestionId} numberOfLines={2} selectable>{getBagDisplayId(bag)}</Text>
                                         {bag.sub_line ? <Text style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>{bag.sub_line}</Text> : null}
                                       </View>
                                       <Text style={styles.suggestionDetail}>{bag.weight} kg</Text>
@@ -4474,16 +4901,16 @@ const DashboardScreen = ({ navigation }: any) => {
                             onPress={() => { setPendingExtrusionLine(line as any); setShowExtrusionModal(true); }}
                           >
                             <View style={[styles.selectionIconBox, { backgroundColor: color }]}><Zap color="#FFF" size={28} /></View>
-                            <View style={styles.selectionText}>
+                        <View style={styles.selectionText}>
                               <Text style={styles.selectionCardTitle}>{line}</Text>
                               <Text style={styles.selectionCardSub}>{sub}</Text>
                             </View>
                             <View style={{ alignItems: 'flex-end', marginRight: 8 }}>
                               <Text style={{ fontSize: 13, fontWeight: '700', color: '#1e293b' }}>{bags} bags</Text>
                               <Text style={{ fontSize: 11, color: '#64748b' }}>{kg.toFixed(1)} kg</Text>
-                            </View>
-                            <ChevronRight color="#CCC" size={24} />
-                          </TouchableOpacity>
+                        </View>
+                        <ChevronRight color="#CCC" size={24} />
+                      </TouchableOpacity>
                         );
                       })}
                     </View>
@@ -4715,7 +5142,7 @@ const DashboardScreen = ({ navigation }: any) => {
                     {/* Pagination */}
                     {extrusionTotalPages > 1 && (
                       <View style={styles.pagination}>
-                        <TouchableOpacity
+                        <TouchableOpacity 
                           style={[styles.pageBtn, extrusionCurrentPage === 1 && styles.pageBtnDisabled]}
                           onPress={() => extrusionCurrentPage > 1 && setExtrusionCurrentPage(extrusionCurrentPage - 1)}
                           disabled={extrusionCurrentPage === 1}
@@ -4726,7 +5153,7 @@ const DashboardScreen = ({ navigation }: any) => {
                           <Text style={styles.pageInfoMain}>{extrusionCurrentPage} / {extrusionTotalPages}</Text>
                           <Text style={styles.pageInfoSub}>{extrusionTotalLogs} total</Text>
                         </View>
-                        <TouchableOpacity
+                        <TouchableOpacity 
                           style={[styles.pageBtn, extrusionCurrentPage === extrusionTotalPages && styles.pageBtnDisabled]}
                           onPress={() => extrusionCurrentPage < extrusionTotalPages && setExtrusionCurrentPage(extrusionCurrentPage + 1)}
                           disabled={extrusionCurrentPage === extrusionTotalPages}
@@ -4794,8 +5221,8 @@ const DashboardScreen = ({ navigation }: any) => {
                         {showSuggestions && (
                           <ScrollView style={styles.suggestionsList} keyboardShouldPersistTaps="handled" nestedScrollEnabled>
                             {suggestedBags.map((bag, i) => (
-                              <TouchableOpacity
-                                key={i}
+                              <TouchableOpacity 
+                                key={i} 
                                 style={[styles.suggestionItem, i === suggestedBags.length - 1 && { borderBottomWidth: 0 }]}
                                 onPress={() => {
                                   setSelectedInputBag(bag);
@@ -4803,8 +5230,8 @@ const DashboardScreen = ({ navigation }: any) => {
                                   setBagSearchQuery('');
                                 }}
                               >
-                                <View style={{ flex: 1 }}>
-                                  <Text style={styles.suggestionId}>{bag.output_bag_qr}</Text>
+                                <View style={styles.suggestionLeftCol}>
+                                <Text style={styles.suggestionId} numberOfLines={2} selectable>{getBagDisplayId(bag)}</Text>
                                   {bag.sub_line ? <Text style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>{bag.sub_line}</Text> : null}
                                 </View>
                                 <Text style={styles.suggestionDetail}>{bag.weight} kg</Text>
@@ -4819,8 +5246,10 @@ const DashboardScreen = ({ navigation }: any) => {
                       </TouchableOpacity>
                       {selectedInputBag && (
                         <View style={styles.selectedBagCard}>
-                          <View style={{ flex: 1 }}>
-                            <Text style={styles.selectedBagId}>{selectedInputBag.output_bag_qr}</Text>
+                          <View style={{ flex: 1, minWidth: 0 }}>
+                            <Text style={{ fontSize: 11, color: '#64748b', marginBottom: 2 }}>{t('dashboard.jumboId')}</Text>
+                            <Text style={[styles.selectedBagId, { minWidth: 0 }]} numberOfLines={2} selectable>{getBagDisplayId(selectedInputBag)}</Text>
+                            {(selectedInputBag as any).sub_line ? <Text style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>{t('dashboard.lineLabel')}: {(selectedInputBag as any).sub_line}</Text> : null}
                             <Text style={styles.selectedBagWeight}>{selectedInputBag.weight} kg</Text>
                           </View>
                           <TouchableOpacity onPress={() => setSelectedInputBag(null)}>
@@ -5017,8 +5446,8 @@ const DashboardScreen = ({ navigation }: any) => {
                                 style={[styles.suggestionItem, i === suggestedBags.length - 1 && { borderBottomWidth: 0 }]}
                                 onPress={() => { setSelectedInputBag(bag); setShowSuggestions(false); setBagSearchQuery(''); }}
                               >
-                                <View style={{ flex: 1 }}>
-                                  <Text style={styles.suggestionId}>{bag.output_bag_qr}</Text>
+                                <View style={styles.suggestionLeftCol}>
+                                  <Text style={styles.suggestionId} numberOfLines={2} selectable>{getBagDisplayId(bag)}</Text>
                                   {bag.sub_line ? <Text style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>{bag.sub_line}</Text> : null}
                                 </View>
                                 <Text style={styles.suggestionDetail}>{bag.weight} kg</Text>
@@ -5028,7 +5457,7 @@ const DashboardScreen = ({ navigation }: any) => {
                         )}
                   </View>
                       <TouchableOpacity style={styles.scanButton} onPress={() => { setScanned(false); setShowScanner(true); }}><CameraIcon color="#17a34a" size={20} /><Text style={styles.scanButtonText}>Scan QR Code</Text></TouchableOpacity>
-                      {selectedInputBag && (<View style={styles.selectedBagCard}><View style={{ flex: 1 }}><Text style={styles.selectedBagId}>{selectedInputBag.output_bag_qr}</Text><Text style={styles.selectedBagWeight}>{selectedInputBag.weight} kg</Text></View><TouchableOpacity onPress={() => setSelectedInputBag(null)}><X color="#EB445A" size={20} /></TouchableOpacity></View>)}
+                      {selectedInputBag && (<View style={styles.selectedBagCard}><View style={{ flex: 1, minWidth: 0 }}><Text style={{ fontSize: 11, color: '#64748b', marginBottom: 2 }}>{t('dashboard.jumboId')}</Text><Text style={[styles.selectedBagId, { minWidth: 0 }]} numberOfLines={2} selectable>{getBagDisplayId(selectedInputBag)}</Text>{(selectedInputBag as any).sub_line ? <Text style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>{t('dashboard.lineLabel')}: {(selectedInputBag as any).sub_line}</Text> : null}<Text style={styles.selectedBagWeight}>{selectedInputBag.weight} kg</Text></View><TouchableOpacity onPress={() => setSelectedInputBag(null)}><X color="#EB445A" size={20} /></TouchableOpacity></View>)}
                       <TouchableOpacity 
                         style={[styles.primaryButton, !selectedInputBag && { opacity: 0.5 }]} 
                         disabled={!selectedInputBag || isLoading} 
@@ -5296,7 +5725,7 @@ const DashboardScreen = ({ navigation }: any) => {
                       </TouchableOpacity>
                     </View>
                   )}
-                </View>
+        </View>
               </>
             )}
           </View>
@@ -5472,20 +5901,20 @@ const DashboardScreen = ({ navigation }: any) => {
             {/* STEP 2: PRINT Button (Shown after saving) */}
             {isCurrentLogSaved && (
               <>
-                <TouchableOpacity 
+            <TouchableOpacity 
                   style={[styles.primaryButton, { backgroundColor: '#17a34a', marginBottom: 8, height: 56 }]}
-                  onPress={executePrint}
-                  disabled={isPrinting}
-                >
-                  {isPrinting ? (
-                    <ActivityIndicator color="#FFF" />
-                  ) : (
-                    <>
-                      <PrinterIcon color="#FFF" size={24} style={{ marginRight: 10 }} />
-                      <Text style={[styles.primaryButtonText, { fontSize: 18, fontWeight: '700' }]}>Print Label</Text>
-                    </>
-                  )}
-                </TouchableOpacity>
+              onPress={executePrint}
+              disabled={isPrinting}
+            >
+              {isPrinting ? (
+                  <ActivityIndicator color="#FFF" />
+              ) : (
+                <>
+                    <PrinterIcon color="#FFF" size={24} style={{ marginRight: 10 }} />
+                    <Text style={[styles.primaryButtonText, { fontSize: 18, fontWeight: '700' }]}>Print Label</Text>
+                </>
+              )}
+            </TouchableOpacity>
                 {/* Printer-down hint: close preview and reprint from the logs list */}
                 <View style={{ backgroundColor: '#FEF3C7', borderRadius: 8, padding: 10, marginTop: 4, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                   <Text style={{ fontSize: 13, color: '#92400e', flex: 1 }}>
@@ -5968,6 +6397,9 @@ const styles = StyleSheet.create({
   progressDataValue: { fontSize: 15, fontWeight: '800', color: '#1e293b' },
   selectionContainer: { padding: 16 },
   selectionTitle: { fontSize: 18, fontWeight: '800', color: '#1e293b', marginBottom: 24, textAlign: 'center' },
+  peRawMaterialListContainer: { marginTop: 16, borderTopWidth: 1, borderTopColor: '#e2e8f0', paddingTop: 16 },
+  peRawMaterialListLabel: { fontSize: 13, fontWeight: '600', color: '#64748b', marginBottom: 12 },
+  peRawMaterialList: { maxHeight: 360 },
   selectionCard: { backgroundColor: '#FFF', borderRadius: 16, padding: 20, flexDirection: 'row', alignItems: 'center', marginBottom: 16, borderWidth: 1, borderColor: '#EEE', elevation: 2 },
   selectionIconBox: { width: 52, height: 52, borderRadius: 12, justifyContent: 'center', alignItems: 'center', marginRight: 16 },
   selectionText: { flex: 1 },
@@ -6231,7 +6663,8 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#f1f5f9',
   },
-  suggestionId: { fontSize: 14, fontWeight: '600', color: '#1e293b', flex: 1 },
+  suggestionLeftCol: { flex: 1, minWidth: 120, marginRight: 8 },
+  suggestionId: { fontSize: 14, fontWeight: '600', color: '#1e293b' },
   suggestionDetail: { fontSize: 13, color: '#64748b', fontWeight: '500', marginLeft: 8 },
   scanButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#17a34a', borderStyle: 'dashed', borderRadius: 12, padding: 16, marginBottom: 20 },
   scanButtonText: { color: '#17a34a', fontSize: 16, fontWeight: '700', marginLeft: 10 },

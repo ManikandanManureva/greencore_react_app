@@ -152,6 +152,19 @@ android {
     }
 }
 
+// When -PusePrebuiltBundle is set and bundle exists in assets, skip Metro bundle task (avoids "Unable to load script" on device)
+def prebuiltBundle = file("${projectDir}/src/main/assets/index.android.bundle")
+if (prebuiltBundle.exists() && project.hasProperty("usePrebuiltBundle")) {
+    println "Using pre-built JS bundle (no Metro). To regenerate: npm run bundle:android:release"
+    afterEvaluate {
+        tasks.configureEach { task ->
+            if (task.name.contains("Bundle") && task.name.contains("Release") && task.name.contains("JsAndAssets")) {
+                task.enabled = false
+            }
+        }
+    }
+}
+
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")

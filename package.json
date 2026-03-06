@@ -8,11 +8,12 @@
     "android:reverse": "sh scripts/android-reverse-port.sh",
     "ios": "npx expo run:ios",
     "web": "npx expo start --web",
-    "build:apk": "NODE_ENV=production npx expo run:android --variant release --no-build-cache",
+    "build:apk": "NODE_OPTIONS=--max-old-space-size=4096 CI=true NODE_ENV=production npx expo run:android --variant release --no-build-cache",
     "build:release": "npm run build:apk && npm run apk:path",
-    "build:apk:standalone": "cd android && (./gradlew --stop 2>/dev/null; true) && ./gradlew assembleRelease",
+    "build:apk:standalone": "sh scripts/build-apk.sh",
     "build:apk-debug": "cd android && ./gradlew assembleDebug",
     "build:aab": "cd android && ./gradlew bundleRelease",
+    "bundle:android:release": "mkdir -p android/app/src/main/assets && NODE_OPTIONS=--max-old-space-size=4096 npx react-native bundle --platform android --dev false --entry-file index.ts --bundle-output android/app/src/main/assets/index.android.bundle --assets-dest android/app/src/main/assets",
     "prebuild": "npx expo prebuild --platform android",
     "prebuild:clean": "npx expo prebuild --clean --platform android",
     "prebuild:gradle-clean": "cd android && ./gradlew clean",
@@ -51,7 +52,9 @@
     "react-native-web": "^0.21.0"
   },
   "devDependencies": {
+    "@react-native-community/cli": "^20.1.0",
     "@react-native-community/cli-server-api": "^20.1.0",
+    "@react-native/metro-config": "0.81.5",
     "@types/react": "~19.1.0",
     "@types/react-native": "^0.72.8",
     "typescript": "~5.9.2"

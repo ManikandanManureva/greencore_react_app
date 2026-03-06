@@ -1,13 +1,19 @@
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 
-// Use EC2 API for app on device/emulator. Use 'localhost:3000' only for web dev.
+// On device/emulator, "localhost" is the phone — use your Mac's IP so the app hits your local API.
+// Set EXPO_PUBLIC_API_HOST in .env to override. Web always uses localhost.
+const getApiHost = (): string => {
+  if (Platform.OS === 'web') return 'localhost:3000';
+  return (process.env.EXPO_PUBLIC_API_HOST as string) || '172.16.0.29:3000';
+};
+//const API_HOST = getApiHost();
 const API_HOST = '54.169.140.182:3000';
 const API_URL = `http://${API_HOST}`;
-// Local server (this repo) uses /api/auth, /api/production; EC2 uses /auth, /production.
-const API_PREFIX = (API_HOST.startsWith('localhost') || API_HOST.startsWith('127.0.0.1')) ? '/api' : '';
+// Local server (localhost or LAN IP) uses /api/auth, /api/production; EC2 uses /auth, /production.
+const isLocalServer = /^(localhost|127\.0\.0\.1|192\.168\.|172\.16\.|10\.0\.)/.test(API_HOST);
+const API_PREFIX = isLocalServer ? '/api' : '';
 
 console.log('Connecting to API at:', API_URL, 'prefix:', API_PREFIX || '(none)');
 
