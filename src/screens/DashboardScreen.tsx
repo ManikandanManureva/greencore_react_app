@@ -1552,20 +1552,40 @@ const DashboardScreen = ({ navigation }: any) => {
     setShowCameraPreview(false);
   };
 
-  const handleBarCodeScanned = async ({ data }: any) => {
+  const handleBarCodeScanned = async (event: any) => {
     if (scanned) return; // Prevent multiple scans
     setScanned(true);
     try {
+      // Support multiple barcode callback shapes: { data }, { type, data }, { nativeEvent: { data } }
+      const raw =
+        typeof event?.data === 'string' ? event.data
+        : event?.nativeEvent?.data != null ? String(event.nativeEvent.data)
+        : typeof event === 'string' ? event
+        : '';
+      if (!raw || String(raw).trim() === '') {
+        setScanned(false);
+        return;
+      }
+
       let qrCode: string;
       let weight: number = 0;
-      
-      // Parse QR code data
+
+      // Parse QR code data (may be JSON like {"id":"20260306-PC-S2-CRP-032","weight":890} or plain ID)
       try {
-        const parsed = JSON.parse(data);
-        qrCode = parsed.id || data;
-        weight = parsed.weight || 0;
-      } catch (e) {
-        qrCode = data;
+        const parsed = JSON.parse(raw);
+        qrCode = (parsed.id ?? parsed.output_bag_qr ?? parsed.outputBagQr ?? raw).toString().trim();
+        weight = Number(parsed.weight) || 0;
+      } catch {
+        qrCode = String(raw).trim();
+      }
+      // If QR looks like a URL, take the last path segment as batch ID (e.g. .../batch/20260306-PC-S2-CRP-032)
+      if (qrCode.startsWith('http') && qrCode.includes('/')) {
+        const segment = qrCode.replace(/\/+$/, '').split('/').pop();
+        if (segment && segment.length > 5) qrCode = segment;
+      }
+      if (!qrCode) {
+        setScanned(false);
+        return;
       }
 
       // Validate the scanned QR code matches the expected batch type (same flow as search)
@@ -1587,6 +1607,8 @@ const DashboardScreen = ({ navigation }: any) => {
           selectedStation!.id,
           'pending',
           ['3E', 'Rapid'],
+          undefined,
+          true,
         );
         if (response.data.success && response.data.data.length > 0) {
           const matchedBatch = response.data.data[0];
@@ -1643,6 +1665,8 @@ const DashboardScreen = ({ navigation }: any) => {
           selectedStation?.id,
           statusFilter,
           sourceSubLines,
+          undefined,
+          true,
         );
         if (response.data.success && response.data.data.length > 0) {
           // Found matching batch - show batch no., user taps Save to process (same as manual search)
@@ -1974,6 +1998,8 @@ const DashboardScreen = ({ navigation }: any) => {
           selectedStation!.id,  // current station = Crusher (to exclude already-in-use bags)
           'pending',
           ['3E', 'Rapid'],      // only 3E and Rapid sub-lines
+          undefined,
+          true,
         );
         if (response.data.success) {
           const list = normalizeSuggestedBags(response.data.data || []);
@@ -2001,6 +2027,8 @@ const DashboardScreen = ({ navigation }: any) => {
           selectedStation.id,
           statusFilter,
           ['3E', 'Rapid', 'Betty'], // Only crusher sub-lines are valid washing inputs
+          undefined,
+          true,
         );
         if (response.data.success) { 
           const list = normalizeSuggestedBags(response.data.data || []);
@@ -2033,7 +2061,7 @@ const DashboardScreen = ({ navigation }: any) => {
           targetStationId = 3;
         }
         statusFilter = 'pending';
-        const response = await productionApi.searchLogs(text, targetStationId, selectedStation.id, statusFilter);
+        const response = await productionApi.searchLogs(text, targetStationId, selectedStation.id, statusFilter, undefined, undefined, true);
         if (response.data.success) { 
           const list = normalizeSuggestedBags(response.data.data || []);
           setSuggestedBags(list);
@@ -2058,7 +2086,7 @@ const DashboardScreen = ({ navigation }: any) => {
         const washStation = stations.find((s: Station) => s.name?.toLowerCase().includes('washing') || (s as any).code === 'WSH');
         targetStationId = extStation ? extStation.id : (washStation?.id ?? 3);
         statusFilter = 'pending';
-        const response = await productionApi.searchLogs(text, targetStationId, selectedStation?.id, statusFilter);
+        const response = await productionApi.searchLogs(text, targetStationId, selectedStation?.id, statusFilter, undefined, undefined, true);
         if (response.data.success) {
           const list = normalizeSuggestedBags(response.data.data || []);
           setSuggestedBags(list);
@@ -2075,7 +2103,7 @@ const DashboardScreen = ({ navigation }: any) => {
         setShowSuggestions(false);
         return;
       }
-      const response = await productionApi.searchLogs(text, targetStationId, selectedStation?.id);
+      const response = await productionApi.searchLogs(text, targetStationId, selectedStation?.id, undefined, undefined, undefined, true);
       if (response.data.success) {
         const list = normalizeSuggestedBags(response.data.data || []);
         setSuggestedBags(list);

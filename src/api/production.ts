@@ -47,7 +47,7 @@ export const productionApi = {
     client.get(`/production/shift/${shiftId}/by-products`),
   updateByProducts: (shiftId: number, byProducts: any[]) =>
     client.put(`/production/shift/${shiftId}/by-products`, { byProducts }),
-  searchLogs: (query: string, targetStationId?: number, currentStationId?: number, status?: string, sourceSubLines?: string[], shiftId?: number) =>
+  searchLogs: (query: string, targetStationId?: number, currentStationId?: number, status?: string, sourceSubLines?: string[], shiftId?: number, forInput?: boolean) =>
     client.get('/production/search-logs', {
       params: {
         query,
@@ -56,6 +56,7 @@ export const productionApi = {
         status,
         ...(sourceSubLines && sourceSubLines.length > 0 && { source_sub_lines: sourceSubLines.join(',') }),
         ...(shiftId && { shift_id: shiftId }),
+        ...(forInput && { for_input: '1' }),
       },
     }),
   getCrusherLogs: (subLine?: string, date?: string, search?: string, status?: string, page?: number, limit?: number, shiftId?: number | null) => {
