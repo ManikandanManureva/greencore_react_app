@@ -1,29 +1,42 @@
 #!/bin/bash
-
-# Build script for Greencore React Native APK
-# This ensures the JavaScript bundle is properly embedded
+# Build standalone APK without Metro (avoids "Unable to load script" on device).
+# 1) Pre-bundle JS into android/app/src/main/assets/index.android.bundle
+# 2) Run Gradle with -PusePrebuiltBundle so it skips the bundle task and uses that file.
 
 set -e
 
-echo "🚀 Building Greencore APK..."
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ASSETS_DIR="$PROJECT_ROOT/android/app/src/main/assets"
+BUNDLE_PATH="$ASSETS_DIR/index.android.bundle"
 
-# Navigate to project root
-cd "$(dirname "$0")/.."
+cd "$PROJECT_ROOT"
 
-# Clean previous builds
-echo "🧹 Cleaning previous builds..."
-cd android
-./gradlew clean
-cd ..
+echo "Building standalone APK (no Metro required)..."
 
-# Pre-bundle JavaScript for release
-echo "📦 Pre-bundling JavaScript..."
-npx expo export --platform android --output-dir android/app/src/main/assets
+# 1. Pre-bundle JavaScript for release
+echo "Pre-bundling JavaScript..."
+mkdir -p "$ASSETS_DIR"
+export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=4096}"
+npx react-native bundle \
+  --platform android \
+  --dev false \
+  --entry-file index.ts \
+  --bundle-output "$BUNDLE_PATH" \
+  --assets-dest "$ASSETS_DIR"
 
-# Build release APK
-echo "🔨 Building release APK..."
-cd android
-./gradlew assembleRelease
+if [ ! -f "$BUNDLE_PATH" ]; then
+  echo "Error: Bundle was not created at $BUNDLE_PATH"
+  exit 1
+fi
+echo "Bundle created."
 
-echo "✅ Build complete!"
-echo "📱 APK location: android/app/build/outputs/apk/release/app-release.apk"
+# 2. Build release APK using pre-built bundle (skip Metro bundle task)
+echo "Building release APK..."
+cd "$PROJECT_ROOT/android"
+./gradlew assembleRelease -PusePrebuiltBundle
+
+echo ""
+echo "APK built successfully (standalone, no Metro needed)."
+echo "Location: android/app/build/outputs/apk/release/app-release.apk"
+echo "Install: adb install -r android/app/build/outputs/apk/release/app-release.apk"

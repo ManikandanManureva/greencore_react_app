@@ -304,6 +304,9 @@ const DashboardScreen = ({ navigation }: any) => {
   const [previewData, setPreviewData] = useState<any>(null);
   const [remarkInput, setRemarkInput] = useState('');
   const [previewBagStatus, setPreviewBagStatus] = useState<'pending' | 'Completed'>('pending');
+  const previewBagStatusRef = React.useRef<'pending' | 'Completed'>('pending');
+  // Ref is set directly in status toggle and preview open/close handlers. Do NOT sync ref from state
+  // here — a re-render with stale state can overwrite the ref to 'pending' after user chose 'Completed'.
   const [isPrinting, setIsPrinting] = useState(false);
   const qrRef = React.useRef<any>(null);
   const listQrRef = React.useRef<any>(null);
@@ -312,16 +315,22 @@ const DashboardScreen = ({ navigation }: any) => {
   const maxDate = useMemo(() => new Date(), []);
 
   /** JUMBO/bag ID from API (supports snake_case and camelCase so web and native both show full ID). */
-  const getBagDisplayId = (bag: any): string =>
-    (bag?.output_bag_qr ?? bag?.outputBagQr ?? bag?.input_bag_qr ?? bag?.inputBagQr ?? '—') as string;
+  const getBagDisplayId = (bag: any): string => {
+    const qr = (bag?.output_bag_qr ?? bag?.outputBagQr ?? bag?.input_bag_qr ?? bag?.inputBagQr ?? '') as string;
+    return typeof qr === 'string' && qr.trim() !== '' ? qr.trim() : '—';
+  };
 
   /** Normalize search result bags so QR is always in output_bag_qr/outputBagQr for dropdown display. */
   const normalizeSuggestedBags = (bags: any[]): any[] =>
-    (bags || []).map((b: any) => ({
-      ...b,
-      output_bag_qr: b.output_bag_qr ?? b.outputBagQr ?? b.input_bag_qr ?? b.inputBagQr,
-      outputBagQr: b.outputBagQr ?? b.output_bag_qr ?? b.inputBagQr ?? b.input_bag_qr,
-    }));
+    (bags || []).map((b: any) => {
+      const qr = b?.output_bag_qr ?? b?.outputBagQr ?? b?.input_bag_qr ?? b?.inputBagQr ?? '';
+      const qrStr = typeof qr === 'string' ? qr.trim() : String(qr || '').trim();
+      return {
+        ...b,
+        output_bag_qr: qrStr || (b?.output_bag_qr ?? b?.outputBagQr ?? b?.input_bag_qr ?? b?.inputBagQr),
+        outputBagQr: qrStr || (b?.outputBagQr ?? b?.output_bag_qr ?? b?.inputBagQr ?? b?.input_bag_qr),
+      };
+    });
 
   // Initial Load
   useEffect(() => {
@@ -491,13 +500,15 @@ const DashboardScreen = ({ navigation }: any) => {
         const logsRes = await productionApi.getShiftLogs(shift.id);
         if (logsRes.data.success) setShiftLogs(logsRes.data.data);
       } else {
-        // No active shift — check if there is a recently closed shift today
-        // so we can display "Shift Closed" instead of the start button
+        // No active shift — check if there is a recently closed shift *for this shift type* today
+        // so we can display "Shift Closed" only when it matches the selected shift (e.g. Shift 1).
+        // If user switched to Shift 2, we must show "Start Shift" for Shift 2, not Shift 1 closed.
         try {
           const latestRes = await productionApi.getLatestShift();
           if (latestRes.data.success && latestRes.data.data) {
             const latest = latestRes.data.data;
-            if (!latest.is_active && latest.end_time) {
+            const isSameShiftType = latest.shift_type_id != null && selectedShift?.id != null && Number(latest.shift_type_id) === Number(selectedShift.id);
+            if (isSameShiftType && !latest.is_active && latest.end_time) {
               const startMs = new Date(latest.start_time).getTime();
               const endMs = new Date(latest.end_time).getTime();
               setIsShiftActive(false);
@@ -506,20 +517,27 @@ const DashboardScreen = ({ navigation }: any) => {
               setShiftEndedAt(endMs);
               setShiftDuration(formatDuration(endMs - startMs));
               const logsRes = await productionApi.getShiftLogs(latest.id);
-        if (logsRes.data.success) setShiftLogs(logsRes.data.data);
-      } else {
-        setIsShiftActive(false);
-        setBackendShiftId(null);
-        setShiftLogs([]);
+              if (logsRes.data.success) setShiftLogs(logsRes.data.data);
+              else setShiftLogs([]);
+            } else {
+              setIsShiftActive(false);
+              setBackendShiftId(null);
+              setShiftStartTime(null);
+              setShiftEndedAt(null);
+              setShiftLogs([]);
             }
           } else {
             setIsShiftActive(false);
             setBackendShiftId(null);
+            setShiftStartTime(null);
+            setShiftEndedAt(null);
             setShiftLogs([]);
           }
         } catch (_) {
           setIsShiftActive(false);
           setBackendShiftId(null);
+          setShiftStartTime(null);
+          setShiftEndedAt(null);
           setShiftLogs([]);
         }
       }
@@ -1569,7 +1587,6 @@ const DashboardScreen = ({ navigation }: any) => {
           selectedStation!.id,
           'pending',
           ['3E', 'Rapid'],
-          backendShiftId ?? undefined,
         );
         if (response.data.success && response.data.data.length > 0) {
           const matchedBatch = response.data.data[0];
@@ -1626,7 +1643,6 @@ const DashboardScreen = ({ navigation }: any) => {
           selectedStation?.id,
           statusFilter,
           sourceSubLines,
-          backendShiftId ?? undefined,
         );
         if (response.data.success && response.data.data.length > 0) {
           // Found matching batch - show batch no., user taps Save to process (same as manual search)
@@ -1691,9 +1707,11 @@ const DashboardScreen = ({ navigation }: any) => {
           weight: weightInput,
           station: stationDisplay || selectedStation.name,
           line: lineDisplay,
-          date: new Date().toLocaleDateString()
+          date: new Date().toLocaleDateString(),
+          bagStatus: 'pending' as const
         });
         setPreviewBagStatus('pending');
+        previewBagStatusRef.current = 'pending';
         setShowPrintPreview(true);
       } else {
         Alert.alert(t('common.error'), response.data?.message || t('messages.failedToGenerateQR'));
@@ -1705,38 +1723,33 @@ const DashboardScreen = ({ navigation }: any) => {
     }
   };
 
-  const handleSaveProduction = async () => {
+  const handleSaveProduction = async (statusAtTap?: 'pending' | 'Completed') => {
     if (!previewData || !backendShiftId || !selectedStation) return;
     if (isShiftEnded) { Alert.alert('Shift Ended', 'Cannot add output after shift has ended.'); return; }
     try {
       setIsLoading(true);
-      // Worker-selected status: pending = temporary jumbo bag, Completed = final jumbo bag
-      const status = previewBagStatus;
-      // Send photos as comma-separated string (or first photo if only one)
+      // Status must be exactly what the user chose (Final = Completed, Temporary = pending). Prefer value passed at SAVE tap.
+      const chosenStatus: 'pending' | 'Completed' = statusAtTap ?? previewBagStatusRef.current ?? previewBagStatus;
       const photoUrl = capturedImages.length > 0 ? capturedImages.join(',') : null;
-      
-      // Use the weight captured at QR generation time (previewData.weight),
-      // not the live input field which may already be cleared.
       const savedWeight = parseFloat(previewData.weight ?? weightInput);
-      // For PE: store the actual output type as sub_line for reports clarity
       const saveSubLine = isPE
         ? (selectedStation.name?.toLowerCase().includes('extrusion')
-            ? selectedSubLine   // e.g. 'Pellet PE SUPER'
-            : peOutputType)     // e.g. 'Flakes PE SUPER'
+            ? selectedSubLine
+            : peOutputType)
         : selectedSubLine;
-      
-      const response = await productionApi.logProduction({
+      const payload = {
         shiftId: backendShiftId,
         stationId: selectedStation.id,
         inputBagQr: selectedInputBag?.output_bag_qr || null,
         outputBagQr: previewData.qrCode,
         weight: isNaN(savedWeight) ? 0 : savedWeight,
-        status: status,
+        status: chosenStatus === 'Completed' ? 'Completed' : 'pending',
         subLine: saveSubLine || undefined,
         photoUrl: photoUrl,
         remark: remarkInput.trim() || undefined,
         shiftTypeId: selectedShift?.id
-      });
+      };
+      const response = await productionApi.logProduction(payload);
       if (response.data.success) {
         const savedLog = response.data.data;
         const updatedLogs = [...shiftLogs, savedLog];
@@ -1803,6 +1816,7 @@ const DashboardScreen = ({ navigation }: any) => {
     setWeightInput('');
     setRemarkInput('');
     setPreviewBagStatus('pending');
+    previewBagStatusRef.current = 'pending';
     setSelectedInputBag(null);
     setCapturedImages([]);
     // Keep user on station
@@ -1960,7 +1974,6 @@ const DashboardScreen = ({ navigation }: any) => {
           selectedStation!.id,  // current station = Crusher (to exclude already-in-use bags)
           'pending',
           ['3E', 'Rapid'],      // only 3E and Rapid sub-lines
-          backendShiftId ?? undefined,
         );
         if (response.data.success) {
           const list = normalizeSuggestedBags(response.data.data || []);
@@ -1988,7 +2001,6 @@ const DashboardScreen = ({ navigation }: any) => {
           selectedStation.id,
           statusFilter,
           ['3E', 'Rapid', 'Betty'], // Only crusher sub-lines are valid washing inputs
-          backendShiftId ?? undefined,
         );
         if (response.data.success) { 
           const list = normalizeSuggestedBags(response.data.data || []);
@@ -3660,8 +3672,8 @@ const DashboardScreen = ({ navigation }: any) => {
                                   onPress={() => { setSelectedInputBag(bag); setShowSuggestions(false); setBagSearchQuery(''); }}
                                 >
                                   <View style={styles.suggestionLeftCol}>
-                                    <Text style={styles.suggestionId} numberOfLines={2} selectable>{getBagDisplayId(bag)}</Text>
-                                    {bag.sub_line ? <Text style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>{bag.sub_line}</Text> : null}
+                                    <Text style={styles.suggestionQrLine} numberOfLines={2} selectable>{getBagDisplayId(bag)}</Text>
+                                    {bag.sub_line ? <Text style={styles.suggestionSubLine}>{bag.sub_line}</Text> : null}
                                   </View>
                                   <Text style={styles.suggestionDetail}>{bag.weight} kg</Text>
                                 </TouchableOpacity>
@@ -4267,8 +4279,8 @@ const DashboardScreen = ({ navigation }: any) => {
                                 }}
                               >
                                 <View style={styles.suggestionLeftCol}>
-                                <Text style={styles.suggestionId} numberOfLines={2} selectable>{getBagDisplayId(bag)}</Text>
-                                  {bag.sub_line ? <Text style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>{bag.sub_line}</Text> : null}
+                                <Text style={styles.suggestionQrLine} numberOfLines={2} selectable>{getBagDisplayId(bag)}</Text>
+                                  {bag.sub_line ? <Text style={styles.suggestionSubLine}>{bag.sub_line}</Text> : null}
                                 </View>
                                 <Text style={styles.suggestionDetail}>{bag.weight} kg</Text>
                               </TouchableOpacity>
@@ -4751,8 +4763,8 @@ const DashboardScreen = ({ navigation }: any) => {
                                         setBagSearchQuery('');
                                       }}>
                                       <View style={styles.suggestionLeftCol}>
-                                        <Text style={styles.suggestionId} numberOfLines={2} selectable>{getBagDisplayId(bag)}</Text>
-                                        {bag.sub_line ? <Text style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>{bag.sub_line}</Text> : null}
+                                        <Text style={styles.suggestionQrLine} numberOfLines={2} selectable>{getBagDisplayId(bag)}</Text>
+                                        {bag.sub_line ? <Text style={styles.suggestionSubLine}>{bag.sub_line}</Text> : null}
                                       </View>
                                       <Text style={styles.suggestionDetail}>{bag.weight} kg</Text>
                                     </TouchableOpacity>
@@ -5231,8 +5243,8 @@ const DashboardScreen = ({ navigation }: any) => {
                                 }}
                               >
                                 <View style={styles.suggestionLeftCol}>
-                                <Text style={styles.suggestionId} numberOfLines={2} selectable>{getBagDisplayId(bag)}</Text>
-                                  {bag.sub_line ? <Text style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>{bag.sub_line}</Text> : null}
+                                <Text style={styles.suggestionQrLine} numberOfLines={2} selectable>{getBagDisplayId(bag)}</Text>
+                                  {bag.sub_line ? <Text style={styles.suggestionSubLine}>{bag.sub_line}</Text> : null}
                                 </View>
                                 <Text style={styles.suggestionDetail}>{bag.weight} kg</Text>
                               </TouchableOpacity>
@@ -5447,8 +5459,8 @@ const DashboardScreen = ({ navigation }: any) => {
                                 onPress={() => { setSelectedInputBag(bag); setShowSuggestions(false); setBagSearchQuery(''); }}
                               >
                                 <View style={styles.suggestionLeftCol}>
-                                  <Text style={styles.suggestionId} numberOfLines={2} selectable>{getBagDisplayId(bag)}</Text>
-                                  {bag.sub_line ? <Text style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>{bag.sub_line}</Text> : null}
+                                  <Text style={styles.suggestionQrLine} numberOfLines={2} selectable>{getBagDisplayId(bag)}</Text>
+                                  {bag.sub_line ? <Text style={styles.suggestionSubLine}>{bag.sub_line}</Text> : null}
                                 </View>
                                 <Text style={styles.suggestionDetail}>{bag.weight} kg</Text>
                               </TouchableOpacity>
@@ -5845,7 +5857,13 @@ const DashboardScreen = ({ navigation }: any) => {
                   <View style={styles.filterButtons}>
                     <TouchableOpacity
                       style={[styles.filterButton, previewBagStatus === 'pending' && styles.filterButtonActive]}
-                      onPress={() => setPreviewBagStatus('pending')}
+                      onPress={() => {
+                        previewBagStatusRef.current = 'pending';
+                        setPreviewBagStatus('pending');
+                        setPreviewData((prev: any) => prev ? { ...prev, bagStatus: 'pending' as const } : prev);
+                      }}
+                      hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                      activeOpacity={0.7}
                     >
                       <Text style={[styles.filterButtonText, previewBagStatus === 'pending' && styles.filterButtonTextActive]}>
                         {t('dashboard.temporaryJumboBag')}
@@ -5853,7 +5871,13 @@ const DashboardScreen = ({ navigation }: any) => {
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={[styles.filterButton, previewBagStatus === 'Completed' && styles.filterButtonActive]}
-                      onPress={() => setPreviewBagStatus('Completed')}
+                      onPress={() => {
+                        previewBagStatusRef.current = 'Completed';
+                        setPreviewBagStatus('Completed');
+                        setPreviewData((prev: any) => prev ? { ...prev, bagStatus: 'Completed' as const } : prev);
+                      }}
+                      hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                      activeOpacity={0.7}
                     >
                       <Text style={[styles.filterButtonText, previewBagStatus === 'Completed' && styles.filterButtonTextActive]}>
                         {t('dashboard.finalJumboBag')}
@@ -5884,8 +5908,15 @@ const DashboardScreen = ({ navigation }: any) => {
             {!isCurrentLogSaved && (
               <TouchableOpacity 
                 style={[styles.primaryButton, { backgroundColor: '#17a34a', marginBottom: 0, height: 56 }]}
-                onPress={handleSaveProduction}
+                onPress={() => {
+                  // Prefer 'Completed' if user selected it (ref is set on tap; state may lag)
+                  const fromRef = previewBagStatusRef.current;
+                  const fromState = previewBagStatus;
+                  const statusToSend = (fromRef === 'Completed' || fromState === 'Completed') ? 'Completed' : 'pending';
+                  handleSaveProduction(statusToSend);
+                }}
                 disabled={isLoading}
+                activeOpacity={0.8}
               >
                 {isLoading ? (
                   <ActivityIndicator color="#FFF" />
@@ -6665,6 +6696,8 @@ const styles = StyleSheet.create({
   },
   suggestionLeftCol: { flex: 1, minWidth: 120, marginRight: 8 },
   suggestionId: { fontSize: 14, fontWeight: '600', color: '#1e293b' },
+  suggestionQrLine: { fontSize: 13, fontWeight: '700', color: '#0f766e', marginBottom: 2 },
+  suggestionSubLine: { fontSize: 11, color: '#94a3b8', marginTop: 2 },
   suggestionDetail: { fontSize: 13, color: '#64748b', fontWeight: '500', marginLeft: 8 },
   scanButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#17a34a', borderStyle: 'dashed', borderRadius: 12, padding: 16, marginBottom: 20 },
   scanButtonText: { color: '#17a34a', fontSize: 16, fontWeight: '700', marginLeft: 10 },

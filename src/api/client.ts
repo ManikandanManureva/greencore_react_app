@@ -8,8 +8,8 @@ const getApiHost = (): string => {
   if (Platform.OS === 'web') return 'localhost:3000';
   return (process.env.EXPO_PUBLIC_API_HOST as string) || '172.16.0.29:3000';
 };
-//const API_HOST = getApiHost();
-const API_HOST = '54.169.140.182:3000';
+const API_HOST = getApiHost();
+//const API_HOST = '54.169.140.182:3000';
 const API_URL = `http://${API_HOST}`;
 // Local server (localhost or LAN IP) uses /api/auth, /api/production; EC2 uses /auth, /production.
 const isLocalServer = /^(localhost|127\.0\.0\.1|192\.168\.|172\.16\.|10\.0\.)/.test(API_HOST);
