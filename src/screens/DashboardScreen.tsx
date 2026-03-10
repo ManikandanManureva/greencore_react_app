@@ -63,6 +63,29 @@ function parseDateLocal(s: string): Date {
   return new Date(s + 'T12:00:00');
 }
 
+/** Return total minutes from midnight. Handles "HH:MM" and "HH:MM:SS". */
+function toMinutes(time: string): number {
+  const parts = String(time || '').trim().split(':');
+  const h = Number(parts[0]) || 0;
+  const m = Number(parts[1]) || 0;
+  return h * 60 + m;
+}
+
+/** Current time in minutes from midnight (device local time). */
+function nowMinutes(): number {
+  const now = new Date();
+  return now.getHours() * 60 + now.getMinutes();
+}
+
+/** True if the shift has already ended (previous/closed). Normal shifts only; overnight in [end,start) is not "previous". */
+function isShiftPrevious(shift: Shift): boolean {
+  const cur = nowMinutes();
+  const start = toMinutes(shift.start_time);
+  const end = toMinutes(shift.end_time);
+  if (start < end) return cur >= end;
+  return false;
+}
+
 const DashboardScreen = ({ navigation }: any) => {
   const { user, logout, selectedShift } = useAuth();
   
@@ -490,7 +513,7 @@ const DashboardScreen = ({ navigation }: any) => {
     if (!selectedShift) return;
     try {
       setIsLoading(true);
-      const response = await productionApi.getActiveShift(undefined, selectedShift.id);
+      const response = await productionApi.getActiveShift(selectedShift.id);
       if (response.data.success && response.data.data) {
         const shift = response.data.data;
         setIsShiftActive(true);
@@ -509,6 +532,12 @@ const DashboardScreen = ({ navigation }: any) => {
             const latest = latestRes.data.data;
             const isSameShiftType = latest.shift_type_id != null && selectedShift?.id != null && Number(latest.shift_type_id) === Number(selectedShift.id);
             if (isSameShiftType && !latest.is_active && latest.end_time) {
+              // PC operator flow only: show only the shift data view (no Start Shift button)
+              if (!isPPIC) {
+                await handleSelectAnyShift(latest.id, false);
+                return;
+              }
+              // Existing flow (PPIC / others): keep original "Shift Closed" state
               const startMs = new Date(latest.start_time).getTime();
               const endMs = new Date(latest.end_time).getTime();
               setIsShiftActive(false);
@@ -539,6 +568,23 @@ const DashboardScreen = ({ navigation }: any) => {
           setShiftStartTime(null);
           setShiftEndedAt(null);
           setShiftLogs([]);
+        }
+        // PC operator flow only: if selected shift is already closed (previous) and we have no same-type closed from latest,
+        // load the most recent closed session for this shift type and show only its data (no Start Shift button).
+        if (!isPPIC && selectedShift && isShiftPrevious(selectedShift)) {
+          try {
+            const closedRes = await productionApi.getClosedShifts(10, undefined, selectedShift.id);
+            if (closedRes.data?.success && Array.isArray(closedRes.data.data) && closedRes.data.data.length > 0) {
+              const first = closedRes.data.data[0];
+              const sessionId = first.shiftId ?? first.id;
+              if (sessionId != null) {
+                await handleSelectAnyShift(Number(sessionId), false);
+                return;
+              }
+            }
+          } catch (_) {
+            // ignore; fall through to show Start Shift or empty state
+          }
         }
       }
     } catch (e) {
@@ -2153,7 +2199,6 @@ const DashboardScreen = ({ navigation }: any) => {
           {!selectedStation && !showEndShiftSummary && !showShiftClosedView ? (
               isPPIC ? null : (
               <TouchableOpacity onPress={() => {
-                // Clear saved by-products when navigating to shift selection
                 setSavedByProductsOnStartPage([]);
                 setSavedByProductsMeta(null);
                 setClosedShiftId(null);
@@ -2163,16 +2208,46 @@ const DashboardScreen = ({ navigation }: any) => {
                 <Text style={styles.pillValue}>{selectedShift?.name || 'Shift 1'}</Text>
               </TouchableOpacity>
               )
+          ) : showShiftClosedView && !isPPIC ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+              <TouchableOpacity onPress={handleBack} style={styles.backButton}>
+                <ArrowLeft color="#333" size={24} />
+                <View style={{ marginLeft: 10 }}>
+                  <Text style={styles.stationTitle}>{viewingActiveShift ? 'Active Shift' : 'Shift closed'}</Text>
+                  <View style={styles.contextPills}><Text style={styles.smallPill}>{selectedShift?.name}</Text></View>
+                </View>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => {
+                setClosedShiftId(null);
+                navigation.navigate('ShiftSelection');
+              }} style={[styles.headerPill, { marginLeft: 8 }]}>
+                <Text style={styles.pillLabel}>Shift</Text>
+                <Text style={styles.pillValue}>{selectedShift?.name || 'Shift 1'}</Text>
+              </TouchableOpacity>
+            </View>
           ) : (
-            <TouchableOpacity onPress={handleBack} style={styles.backButton}>
-              <ArrowLeft color="#333" size={24} />
-              <View style={{ marginLeft: 10 }}>
-                <Text style={styles.stationTitle}>
-                  {showShiftClosedView ? (viewingActiveShift ? 'Active Shift' : 'Shift closed') : showEndShiftSummary ? 'End Shift' : (selectedStation?.name === 'Washing' ? selectedStation?.name : (selectedSubLine ? `${selectedStation?.name} (${selectedSubLine})` : selectedStation?.name))}
-                </Text>
-                {!showEndShiftSummary && !showShiftClosedView && !isPPIC && <View style={styles.contextPills}><Text style={styles.smallPill}>{selectedShift?.name}</Text></View>}
-              </View>
-            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1 }}>
+              <TouchableOpacity onPress={handleBack} style={styles.backButton}>
+                <ArrowLeft color="#333" size={24} />
+                <View style={{ marginLeft: 10 }}>
+                  <Text style={styles.stationTitle}>
+                    {showShiftClosedView ? (viewingActiveShift ? 'Active Shift' : 'Shift closed') : showEndShiftSummary ? 'End Shift' : (selectedStation?.name === 'Washing' ? selectedStation?.name : (selectedSubLine ? `${selectedStation?.name} (${selectedSubLine})` : selectedStation?.name))}
+                  </Text>
+                  {!showEndShiftSummary && !showShiftClosedView && !isPPIC && <View style={styles.contextPills}><Text style={styles.smallPill}>{selectedShift?.name}</Text></View>}
+                </View>
+              </TouchableOpacity>
+              {!isPPIC && (
+                <TouchableOpacity onPress={() => {
+                  setSavedByProductsOnStartPage([]);
+                  setSavedByProductsMeta(null);
+                  setClosedShiftId(null);
+                  navigation.navigate('ShiftSelection');
+                }} style={[styles.headerPill, { marginLeft: 4 }]}>
+                  <Text style={styles.pillLabel}>Shift</Text>
+                  <Text style={styles.pillValue}>{selectedShift?.name || 'Shift 1'}</Text>
+                </TouchableOpacity>
+              )}
+            </View>
           )}
         </View>
         <View style={styles.headerRight}>

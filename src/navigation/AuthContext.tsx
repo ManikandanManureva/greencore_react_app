@@ -94,32 +94,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
         setUser(userData);
 
-        // ── Auto-restore active shift so ShiftSelection is skipped ──
+        // PPIC: set placeholder so navigator goes to Dashboard. Operators: do NOT set shift
+        // so they always see Shift Selection after login and can choose current or closed shift.
         try {
-          // PPIC users don't have a shift — set a placeholder so navigator skips ShiftSelection
           if (userData.role?.toLowerCase() === 'ppic') {
             const ppicPlaceholder = { id: 0, name: 'PPIC', isPPIC: true };
             await AsyncStorage.setItem('selected_shift', JSON.stringify(ppicPlaceholder));
             setSelectedShiftState(ppicPlaceholder);
           } else {
-            const [activeRes, shiftsRes] = await Promise.all([
-              productionApi.getActiveShift(),
-              masterDataApi.getShifts(),
-            ]);
-            if (activeRes.data.success && activeRes.data.data) {
-              const activeSession = activeRes.data.data;
-              const shiftType = shiftsRes.data.data?.find(
-                (s: any) => s.id === activeSession.shift_type_id
-              );
-              if (shiftType) {
-                await AsyncStorage.setItem('selected_shift', JSON.stringify(shiftType));
-                setSelectedShiftState(shiftType);
-              }
-            }
+            await AsyncStorage.removeItem('selected_shift');
+            setSelectedShiftState(null);
           }
         } catch (shiftErr) {
-          // Non-critical: if this fails user just sees ShiftSelection screen
-          console.warn('Could not restore active shift on login:', shiftErr);
+          console.warn('Could not set shift state on login:', shiftErr);
         }
 
         return response.data;

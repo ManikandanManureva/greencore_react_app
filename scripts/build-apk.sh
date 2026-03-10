@@ -14,16 +14,19 @@ cd "$PROJECT_ROOT"
 
 echo "Building standalone APK (no Metro required)..."
 
-# 1. Pre-bundle JavaScript for release
+# 1. Pre-bundle JavaScript for release (no Metro server; one-off bundle)
 echo "Pre-bundling JavaScript..."
 mkdir -p "$ASSETS_DIR"
 export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=4096}"
+export CI=true
+# Use project Metro config so Expo resolvers and transformers are applied
 npx react-native bundle \
   --platform android \
   --dev false \
   --entry-file index.ts \
   --bundle-output "$BUNDLE_PATH" \
-  --assets-dest "$ASSETS_DIR"
+  --assets-dest "$ASSETS_DIR" \
+  --config "$PROJECT_ROOT/metro.config.js"
 
 if [ ! -f "$BUNDLE_PATH" ]; then
   echo "Error: Bundle was not created at $BUNDLE_PATH"

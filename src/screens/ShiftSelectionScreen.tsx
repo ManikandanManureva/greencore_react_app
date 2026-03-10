@@ -13,24 +13,52 @@ import { useAuth } from '../navigation/AuthContext';
 import { masterDataApi, productionApi } from '../api/production';
 import { Shift } from '../types';
 
-/** Return total minutes from midnight for a "HH:MM" string. */
+/** Return total minutes from midnight. Handles "HH:MM" and "HH:MM:SS" (e.g. 07:00:00). Uses device local time. */
 function toMinutes(time: string): number {
-  const [h, m] = time.split(':').map(Number);
-  return (h ?? 0) * 60 + (m ?? 0);
+  const parts = String(time || '').trim().split(':');
+  const h = Number(parts[0]) || 0;
+  const m = Number(parts[1]) || 0;
+  return h * 60 + m;
 }
 
-/** Return true if the given shift covers the current time. */
+/** Current time in minutes from midnight (device local time — e.g. Indonesia WIB). */
+function nowMinutes(): number {
+  const now = new Date();
+  return now.getHours() * 60 + now.getMinutes();
+}
+
+/** Return true if the given shift covers the current time (device local; shift times assumed same timezone). */
 function isShiftNow(shift: Shift): boolean {
-  const now   = new Date();
-  const cur   = now.getHours() * 60 + now.getMinutes();
+  const cur   = nowMinutes();
   const start = toMinutes(shift.start_time);
   const end   = toMinutes(shift.end_time);
   if (start < end) return cur >= start && cur < end;
   return cur >= start || cur < end; // overnight
 }
 
+/** Return true if the shift has already ended (previous/closed). Normal shifts only; overnight in [end,start) is not "previous". */
+function isShiftPrevious(shift: Shift): boolean {
+  if (isShiftNow(shift)) return false;
+  const cur   = nowMinutes();
+  const start = toMinutes(shift.start_time);
+  const end   = toMinutes(shift.end_time);
+  if (start < end) return cur >= end; // normal: ended when current >= end
+  return false; // overnight: in [end,start) the next start is in the future, so treat as upcoming, not previous
+}
+
+/** Return true if the shift has not started yet (upcoming) — based on shift start time. Disable these. */
+function isShiftUpcoming(shift: Shift): boolean {
+  if (isShiftNow(shift)) return false;
+  if (isShiftPrevious(shift)) return false;
+  const cur   = nowMinutes();
+  const start = toMinutes(shift.start_time);
+  const end   = toMinutes(shift.end_time);
+  if (start < end) return cur < start; // normal: upcoming when current < start
+  return cur >= end && cur < start;    // overnight: upcoming when we're in [end, start) (next start is at 23:00)
+}
+
 const ShiftSelectionScreen = ({ navigation }: any) => {
-  const { user, setSelectedShift } = useAuth();
+  const { user, selectedShift: selectedShiftFromContext, setSelectedShift } = useAuth();
   const isPpic = user?.role?.toLowerCase() === 'ppic';
 
   const [isLoading, setIsLoading]     = useState(true);
@@ -77,9 +105,12 @@ const ShiftSelectionScreen = ({ navigation }: any) => {
         }
       }
 
-      // Operator: auto-detect shift from current clock
-      setSelectedShiftLocal(current);
-      if (current) await setSelectedShift(current);
+      // Operator: preserve existing selection when opening from Dashboard (change shift), else default to current or first previous
+      const existingInList = selectedShiftFromContext && fetchedShifts.find((s) => s.id === selectedShiftFromContext.id);
+      const keepExisting = existingInList && !isShiftUpcoming(existingInList);
+      const previousOrCurrent = keepExisting ? existingInList : (current ?? fetchedShifts.find((s) => !isShiftUpcoming(s)) ?? null);
+      setSelectedShiftLocal(previousOrCurrent);
+      if (previousOrCurrent) await setSelectedShift(previousOrCurrent);
     } catch (err) {
       console.error('Error initializing shift selection:', err);
       setError('Failed to load shifts. Check your connection and retry.');
@@ -93,12 +124,21 @@ const ShiftSelectionScreen = ({ navigation }: any) => {
     await setSelectedShift(shift);
   };
 
+  const handleOperatorSelectShift = async (shift: Shift) => {
+    if (isShiftUpcoming(shift)) return;
+    setSelectedShiftLocal(shift);
+    await setSelectedShift(shift);
+  };
+
   const now     = new Date();
   const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const dateStr = now.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 
-  // PPIC can proceed as soon as shifts load (always has a selection); operators need a time-matched shift
+  // PPIC can proceed as soon as shifts load; operators need a selected shift (current or previous)
   const canProceed = isPpic ? (!isLoading && !!selectedShiftLocal) : (!!selectedShiftLocal && !isLoading);
+  // When selected shift is already started (current) or closed (previous), show "View Shift" instead of "Start Shift"
+  const isSelectedShiftStartedOrClosed = selectedShiftLocal && (isShiftNow(selectedShiftLocal) || isShiftPrevious(selectedShiftLocal));
+  const continueButtonText = isPpic ? 'View Shift Data' : (isSelectedShiftStartedOrClosed ? 'View Shift' : 'Start Shift');
 
   return (
     <SafeAreaView style={styles.container}>
@@ -152,12 +192,21 @@ const ShiftSelectionScreen = ({ navigation }: any) => {
               </View>
             )}
 
+            {/* Operator: hint that current and previous (closed) are selectable; only upcoming is disabled */}
+            {!isPpic && (
+              <View style={styles.operatorHint}>
+                <Clock color="#17a34a" size={14} />
+                <Text style={styles.operatorHintText}>
+                  Select the current shift or a previous (closed) shift. Upcoming shifts are locked.
+                </Text>
+              </View>
+            )}
             {/* Operator: warn if no shift matches current time */}
             {!isPpic && !timeShift && (
               <View style={styles.noShiftBanner}>
                 <AlertCircle color="#d97706" size={16} />
                 <Text style={styles.noShiftText}>
-                  No shift is scheduled for the current time.
+                  No shift is scheduled for the current time. You can select a previous shift below.
                 </Text>
               </View>
             )}
@@ -165,13 +214,15 @@ const ShiftSelectionScreen = ({ navigation }: any) => {
             {shifts.map((shift) => {
               const isNow      = shift.id === timeShift?.id;
               const isSelected = shift.id === selectedShiftLocal?.id;
-              // Operators: only the current-time shift is enabled
-              const isDisabled = !isPpic && !isNow;
+              // Operators: disable only upcoming shifts; enable current and previous
+              const isDisabled = !isPpic && isShiftUpcoming(shift);
 
-              const CardWrapper = isPpic ? TouchableOpacity : View;
-              const cardProps   = isPpic
-                ? { onPress: () => handlePpicSelectShift(shift), activeOpacity: 0.75 }
-                : {};
+              const CardWrapper = TouchableOpacity;
+              const cardProps   = {
+                onPress: () => isPpic ? handlePpicSelectShift(shift) : handleOperatorSelectShift(shift),
+                activeOpacity: 0.75,
+                disabled: isDisabled,
+              };
 
               return (
                 <CardWrapper
@@ -231,12 +282,18 @@ const ShiftSelectionScreen = ({ navigation }: any) => {
               isPpic && styles.continueBtnPpic,
             ]}
             disabled={!canProceed}
-            onPress={() => navigation.navigate('Dashboard')}
+            onPress={() => {
+              if (navigation.canGoBack()) {
+                navigation.goBack();
+              } else {
+                navigation.navigate('Dashboard');
+              }
+            }}
           >
             <View style={styles.continueBtnInner}>
               {isPpic && <BarChart2 color="#FFF" size={18} style={{ marginRight: 8 }} />}
               <Text style={styles.continueBtnText}>
-                {isPpic ? 'View Shift Data' : 'Start Shift'}
+                {continueButtonText}
               </Text>
             </View>
           </TouchableOpacity>
@@ -272,10 +329,12 @@ const styles = StyleSheet.create({
   retryText:   { color: '#374151', fontWeight: '600' },
 
   /* banners */
-  noShiftBanner: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#fffbeb', borderWidth: 1, borderColor: '#fcd34d', borderRadius: 8, padding: 10, marginBottom: 12 },
-  noShiftText:   { flex: 1, fontSize: 12, color: '#92400e', lineHeight: 16 },
-  ppicHint:      { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#eff6ff', borderWidth: 1, borderColor: '#bfdbfe', borderRadius: 8, padding: 10, marginBottom: 12 },
-  ppicHintText:  { flex: 1, fontSize: 12, color: '#1e40af', lineHeight: 16 },
+  noShiftBanner:  { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#fffbeb', borderWidth: 1, borderColor: '#fcd34d', borderRadius: 8, padding: 10, marginBottom: 12 },
+  noShiftText:    { flex: 1, fontSize: 12, color: '#92400e', lineHeight: 16 },
+  operatorHint:   { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#f0fdf4', borderWidth: 1, borderColor: '#86efac', borderRadius: 8, padding: 10, marginBottom: 12 },
+  operatorHintText: { flex: 1, fontSize: 12, color: '#166534', lineHeight: 16 },
+  ppicHint:       { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#eff6ff', borderWidth: 1, borderColor: '#bfdbfe', borderRadius: 8, padding: 10, marginBottom: 12 },
+  ppicHintText:   { flex: 1, fontSize: 12, color: '#1e40af', lineHeight: 16 },
 
   /* shift cards */
   list:          { marginBottom: 4 },
