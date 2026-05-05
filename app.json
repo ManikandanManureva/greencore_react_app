@@ -42,6 +42,9 @@
     },
     "plugins": [
       "expo-camera"
-    ]
+    ],
+    "extra": {
+      "productionLine": ""
+    }
   }
 }

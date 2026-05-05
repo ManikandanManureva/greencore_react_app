@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   StyleSheet,
   View,
@@ -9,9 +9,12 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Clock, AlertCircle, Check, Lock, ShieldCheck, BarChart2 } from 'lucide-react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '../navigation/AuthContext';
 import { masterDataApi, productionApi } from '../api/production';
 import { Shift } from '../types';
+import { t } from '../utils/i18n';
+import { productionLineTitleKeyFromRole } from '../utils/productionLine';
 
 /** Return total minutes from midnight. Handles "HH:MM" and "HH:MM:SS" (e.g. 07:00:00). Uses device local time. */
 function toMinutes(time: string): number {
@@ -67,7 +70,11 @@ const ShiftSelectionScreen = ({ navigation }: any) => {
   const [selectedShiftLocal, setSelectedShiftLocal] = useState<Shift | null>(null);
   const [error, setError]             = useState<string | null>(null);
 
-  useEffect(() => { initSelection(); }, []);
+  useFocusEffect(
+    useCallback(() => {
+      initSelection();
+    }, [user?.role, selectedShiftFromContext?.id])
+  );
 
   const initSelection = async () => {
     try {
@@ -151,6 +158,9 @@ const ShiftSelectionScreen = ({ navigation }: any) => {
           </View>
           <Text style={styles.title}>{isPpic ? 'Dashboard Access' : 'Shift Selection'}</Text>
           <Text style={styles.subtitle}>Welcome, {user?.name}</Text>
+          {!isPpic ? (
+            <Text style={styles.productionLineTag}>{t(productionLineTitleKeyFromRole(user?.role))}</Text>
+          ) : null}
           {isPpic && (
             <View style={styles.ppicBadge}>
               <ShieldCheck color="#17a34a" size={12} />
@@ -283,11 +293,8 @@ const ShiftSelectionScreen = ({ navigation }: any) => {
             ]}
             disabled={!canProceed}
             onPress={() => {
-              if (navigation.canGoBack()) {
-                navigation.goBack();
-              } else {
-                navigation.navigate('Dashboard');
-              }
+              // Always go to a fresh Dashboard render after shift selection.
+              navigation.replace('Dashboard');
             }}
           >
             <View style={styles.continueBtnInner}>
@@ -314,6 +321,7 @@ const styles = StyleSheet.create({
   headerIconPpic: { backgroundColor: '#0ea5e9' },
   title:          { fontSize: 20, fontWeight: '700', color: '#111' },
   subtitle:       { fontSize: 13, color: '#555', marginTop: 4 },
+  productionLineTag: { fontSize: 12, fontWeight: '800', color: '#17a34a', marginTop: 8, letterSpacing: 0.8, textTransform: 'uppercase' },
   dateText:       { fontSize: 11, color: '#17a34a', fontWeight: '600', marginTop: 4 },
   timeText:       { fontSize: 30, fontWeight: '800', color: '#111', marginTop: 4, letterSpacing: 1 },
 

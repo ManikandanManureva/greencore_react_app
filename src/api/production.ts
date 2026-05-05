@@ -80,16 +80,34 @@ export const productionApi = {
     if (shiftId) params.shift_id = shiftId;
     return client.get('/production/extrusion-logs', { params });
   },
-  getFinalPackingLogs: (date?: string, search?: string, status?: string, page?: number, limit?: number, shiftId?: number | null) => {
+  getFinalPackingLogs: (date?: string, search?: string, status?: string, page?: number, limit?: number, shiftId?: number | null, stationId?: number | null) => {
     const params: any = { date, search, page, limit };
     if (status) params.status = status;
     if (shiftId) params.shift_id = shiftId;
+    if (stationId != null) params.station_id = stationId;
     return client.get('/production/final-packing-logs', { params });
   },
   getPpicStationOverview: (date?: string, shiftTypeId?: number | null) => {
     const params: any = { date };
     if (shiftTypeId) params.shift_type_id = shiftTypeId;
     return client.get('/production/ppic-station-overview', { params });
+  },
+  /** Backoffice-style grouped logs; omit `material_type` to include all materials (PC, PE, PET, …). */
+  getLogsAll: (query: {
+    date_start: string;
+    date_end: string;
+    station_code?: string;
+    shift_type?: string;
+    limit?: number;
+  }) => {
+    const params: Record<string, string | number> = {
+      date_start: query.date_start,
+      date_end: query.date_end,
+      limit: query.limit ?? 25000,
+    };
+    if (query.station_code) params.station_code = query.station_code;
+    if (query.shift_type) params.shift_type = query.shift_type;
+    return client.get('/production/logs-all', { params });
   },
   updateLogStatus: (outputBagQr: string, status: string, washingLine?: string, extrusionLine?: string, usedLine?: string) => {
     const body: any = { outputBagQr, status };
@@ -105,6 +123,16 @@ export const productionApi = {
   updateLogWeight: (logId: number, weight: number) => {
     return client.put('/production/update-log-weight', { logId, weight });
   },
+  /** Backoffice-style update by log id (PPIC uses this for per-output remark). */
+  updateProductionLogFields: (
+    logId: number,
+    body: {
+      weight?: number;
+      status?: string;
+      sub_line?: string;
+      remark?: string | null;
+    },
+  ) => client.put(`/production/logs-update/${logId}`, body),
 };
 
 export const masterDataApi = {

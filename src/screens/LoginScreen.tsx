@@ -14,6 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Eye, EyeOff } from 'lucide-react-native';
 import { useAuth } from '../navigation/AuthContext';
 import { t, i18n, Language } from '../utils/i18n';
+import { loginScreenTitleKey } from '../utils/productionLine';
 import LanguageSwitcher from '../components/LanguageSwitcher';
 
 const LoginScreen = () => {
@@ -74,7 +75,7 @@ const LoginScreen = () => {
             </View>
           </View>
 
-          <Text style={styles.appTitle}>{t('login.title')}</Text>
+          <Text style={styles.appHeadline}>{t(loginScreenTitleKey())}</Text>
           <Text style={styles.appSubtitle}>{t('login.subtitle')}</Text>
 
           <View style={styles.form}>
@@ -93,7 +94,7 @@ const LoginScreen = () => {
               <Text style={styles.label}>{t('login.password')}</Text>
               <View style={{ position: 'relative' }}>
                 <TextInput
-                  style={[styles.input, { paddingRight: 45 }]}
+                  style={[styles.input, styles.inputPassword]}
                   placeholder={t('login.passwordPlaceholder')}
                 value={password}
                 onChangeText={(v) => { setPassword(v); setErrorMessage(null); }}
@@ -102,6 +103,7 @@ const LoginScreen = () => {
                 <TouchableOpacity
                   style={styles.eyeIcon}
                   onPress={() => setShowPassword(!showPassword)}
+                  accessibilityLabel={showPassword ? 'Hide password' : 'Show password'}
                 >
                   {showPassword ? (
                     <EyeOff size={20} color="#666" />
@@ -194,18 +196,20 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '100%',
   },
-  appTitle: {
-    fontSize: 24,
-    fontWeight: '700',
-    color: '#333',
+  appHeadline: {
+    fontSize: 22,
+    fontWeight: '800',
+    color: '#111',
     textAlign: 'center',
-    marginBottom: 6,
+    marginBottom: 8,
+    letterSpacing: -0.3,
   },
   appSubtitle: {
     fontSize: 14,
-    color: '#666',
+    fontWeight: '500',
+    color: '#555',
     textAlign: 'center',
-    marginBottom: 32,
+    marginBottom: 28,
   },
   form: {
     width: '100%',
@@ -227,10 +231,18 @@ const styles = StyleSheet.create({
     color: '#333',
     backgroundColor: '#FFF',
   },
+  inputPassword: {
+    paddingRight: 48,
+    minHeight: 48,
+  },
   eyeIcon: {
     position: 'absolute',
-    right: 12,
-    top: 12,
+    right: 4,
+    top: 0,
+    bottom: 0,
+    width: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   errorBox: {
     backgroundColor: '#FEF2F2',

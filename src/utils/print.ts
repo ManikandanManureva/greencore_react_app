@@ -332,29 +332,63 @@ export const printService = {
 
     // Build Excel-style per-process data: material movement (input/output/waste) per process
     const getWaste = (processLabel: string, name: string) => {
-      const p = byProducts.find((x: any) => (x.processLabel === processLabel || !processLabel) && String(x.name || '').trim() === name);
+      const plW = String(processLabel || '').trim();
+      const nmW = String(name || '').trim().toLowerCase();
+      const p = byProducts.find(
+        (x: any) =>
+          String(x.processLabel || '').trim() === plW && String(x.name || '').trim().toLowerCase() === nmW,
+      );
       return p ? (typeof p.weight === 'number' ? p.weight : Number(p.weight) || 0) : 0;
     };
+    /** Sum weights for rows matching any of the process labels and exact waste name (handles legacy wrong processLabel). */
+    const sumWasteByProcesses = (processLabels: string[], name: string) => {
+      const labels = new Set(processLabels.map((l) => String(l || '').trim()));
+      const want = String(name || '').trim().toLowerCase();
+      let sum = 0;
+      for (const x of byProducts) {
+        if (!labels.has(String(x.processLabel || '').trim())) continue;
+        if (String(x.name || '').trim().toLowerCase() !== want) continue;
+        sum += typeof x.weight === 'number' ? x.weight : Number(x.weight) || 0;
+      }
+      return sum;
+    };
+    // Crusher/Remove label: PC uses removeLabelCrushing (Dust Remove Label, Sweep Floor); PE uses crusherWashing (Dust, Sweep Floor)
+    const dustRmwKg =
+      getWaste('removeLabelCrushing', 'Dust Remove Label') ||
+      getWaste('crusherWashing', 'Dust') ||
+      getWaste('removeLabelCrushing', 'Dust');
+    const sweepCrusherKg =
+      getWaste('removeLabelCrushing', 'Sweep Floor') || getWaste('crusherWashing', 'Sweep Floor');
     const processes = [
       {
         key: 'removeLabelCrushing',
         titleKey: 'print.processRemoveLabelCrusher',
         outputKg: byStation ? Number(byStation.crusher?.weight || 0) : 0,
-        dustRmwLabelKg: getWaste('removeLabelCrushing', 'Dust Remove Label'),
-        sweepCrusherKg: getWaste('removeLabelCrushing', 'Sweep Floor'),
+        dustRmwLabelKg: dustRmwKg,
+        sweepCrusherKg,
       },
       {
         key: 'washing',
         titleKey: 'print.processBetyWashing',
         outputKg: byStation ? Number(byStation.washing?.weight || 0) : 0,
-        wasteKg: getWaste('washing', 'Dust wet'),
+        wasteKg: getWaste('washing', 'Dust wet') || getWaste('washing', 'Dust'),
       },
       {
         key: 'extrusion',
         titleKey: 'print.processExtrusionReport',
         outputKg: byStation ? Number(byStation.extrusion?.weight || 0) : 0,
-        lumpsKg: getWaste('extrusion', 'Lumps'),
-        sweepKg: getWaste('extrusion', 'Sweep Floor'),
+        lumpsKg:
+          getWaste('extrusion', 'Lumps') ||
+          getWaste('boretech', 'Lumps') ||
+          sumWasteByProcesses(['extrusion', 'boretech'], 'Lumps'),
+        dustExtrKg:
+          getWaste('extrusion', 'Dust') ||
+          getWaste('boretech', 'Dust') ||
+          sumWasteByProcesses(['extrusion', 'boretech'], 'Dust'),
+        sweepKg:
+          getWaste('extrusion', 'Sweep Floor') ||
+          getWaste('boretech', 'Sweep Floor') ||
+          sumWasteByProcesses(['extrusion', 'boretech'], 'Sweep Floor'),
       },
     ];
 
@@ -412,9 +446,9 @@ export const printService = {
             const row = [str(data.shift), str(data.operator), t('print.na'), str(proc.outputKg.toFixed(1)), t('print.na'), t('print.na'), str(proc.wasteKg), '', str(data.remark || '')];
             autoTable(doc, { head, body: [row], showHead: 'firstPage', theme: 'plain', tableLineWidth: 0.05, margin: { left: 14, right: 14 }, startY: y, tableWidth: 'auto', styles: { fontSize: 7 }, headStyles: { fontStyle: 'bold', fillColor: [232, 245, 233] }, columnStyles: { 2: { halign: 'right' }, 3: { halign: 'right' }, 4: { halign: 'right' }, 6: { halign: 'right' }, 7: { halign: 'right' } } });
           } else {
-            const head = [[t('print.shiftCol'), t('print.pic'), t('print.inputKg'), t('print.outputKg'), t('print.yieldPct'), t('print.target'), 'Lumps (kg)', t('print.sweepCrusherKg'), t('print.wastePct'), t('print.remarks')]];
-            const row = [str(data.shift), str(data.operator), t('print.na'), str(proc.outputKg.toFixed(1)), t('print.na'), t('print.na'), str(proc.lumpsKg), str(proc.sweepKg), '', str(data.remark || '')];
-            autoTable(doc, { head, body: [row], showHead: 'firstPage', theme: 'plain', tableLineWidth: 0.05, margin: { left: 14, right: 14 }, startY: y, tableWidth: 'auto', styles: { fontSize: 7 }, headStyles: { fontStyle: 'bold', fillColor: [255, 243, 224] }, columnStyles: { 2: { halign: 'right' }, 3: { halign: 'right' }, 4: { halign: 'right' }, 6: { halign: 'right' }, 7: { halign: 'right' }, 8: { halign: 'right' } } });
+            const head = [[t('print.shiftCol'), t('print.pic'), t('print.inputKg'), t('print.outputKg'), t('print.yieldPct'), t('print.target'), 'Lumps (kg)', 'Dust (kg)', t('print.sweepCrusherKg'), t('print.wastePct'), t('print.remarks')]];
+            const row = [str(data.shift), str(data.operator), t('print.na'), str(proc.outputKg.toFixed(1)), t('print.na'), t('print.na'), str((proc as any).lumpsKg), str((proc as any).dustExtrKg), str((proc as any).sweepKg), '', str(data.remark || '')];
+            autoTable(doc, { head, body: [row], showHead: 'firstPage', theme: 'plain', tableLineWidth: 0.05, margin: { left: 14, right: 14 }, startY: y, tableWidth: 'auto', styles: { fontSize: 7 }, headStyles: { fontStyle: 'bold', fillColor: [255, 243, 224] }, columnStyles: { 2: { halign: 'right' }, 3: { halign: 'right' }, 4: { halign: 'right' }, 6: { halign: 'right' }, 7: { halign: 'right' }, 8: { halign: 'right' }, 9: { halign: 'right' } } });
           }
           y = (doc as any).lastAutoTable.finalY + 8;
         }
@@ -440,7 +474,7 @@ export const printService = {
       if (proc.key === 'washing') {
         return `<div class="process-block" style="background:#e8f5e9;padding:8px 10px;margin-bottom:12px;border-radius:4px;"><div class="section-title">${t('print.processBetyWashing')}</div><table class="ppic-table"><thead><tr><th>${t('print.shiftCol')}</th><th>${t('print.pic')}</th><th>${t('print.inputKg')}</th><th>${t('print.outputKg')}</th><th>${t('print.yieldPct')}</th><th>${t('print.target')}</th><th>${t('print.wasteKg')}</th><th>${t('print.wastePct')}</th><th>${t('print.remarks')}</th></tr></thead><tbody><tr><td>${esc(data.shift)}</td><td>${esc(data.operator)}</td><td class="num">${t('print.na')}</td><td class="num">${proc.outputKg.toFixed(1)}</td><td class="num">${t('print.na')}</td><td class="num">${t('print.na')}</td><td class="num">${proc.wasteKg}</td><td class="num"></td><td>${esc(data.remark || '')}</td></tr></tbody></table></div>`;
       }
-      return `<div class="process-block" style="background:#fff3e0;padding:8px 10px;margin-bottom:12px;border-radius:4px;"><div class="section-title">${t('print.processExtrusionReport')}</div><table class="ppic-table"><thead><tr><th>${t('print.shiftCol')}</th><th>${t('print.pic')}</th><th>${t('print.inputKg')}</th><th>${t('print.outputKg')}</th><th>${t('print.yieldPct')}</th><th>${t('print.target')}</th><th>Lumps (kg)</th><th>${t('print.sweepCrusherKg')}</th><th>${t('print.wastePct')}</th><th>${t('print.remarks')}</th></tr></thead><tbody><tr><td>${esc(data.shift)}</td><td>${esc(data.operator)}</td><td class="num">${t('print.na')}</td><td class="num">${proc.outputKg.toFixed(1)}</td><td class="num">${t('print.na')}</td><td class="num">${t('print.na')}</td><td class="num">${proc.lumpsKg}</td><td class="num">${proc.sweepKg}</td><td class="num"></td><td>${esc(data.remark || '')}</td></tr></tbody></table></div>`;
+      return `<div class="process-block" style="background:#fff3e0;padding:8px 10px;margin-bottom:12px;border-radius:4px;"><div class="section-title">${t('print.processExtrusionReport')}</div><table class="ppic-table"><thead><tr><th>${t('print.shiftCol')}</th><th>${t('print.pic')}</th><th>${t('print.inputKg')}</th><th>${t('print.outputKg')}</th><th>${t('print.yieldPct')}</th><th>${t('print.target')}</th><th>Lumps (kg)</th><th>Dust (kg)</th><th>${t('print.sweepCrusherKg')}</th><th>${t('print.wastePct')}</th><th>${t('print.remarks')}</th></tr></thead><tbody><tr><td>${esc(data.shift)}</td><td>${esc(data.operator)}</td><td class="num">${t('print.na')}</td><td class="num">${proc.outputKg.toFixed(1)}</td><td class="num">${t('print.na')}</td><td class="num">${t('print.na')}</td><td class="num">${proc.lumpsKg}</td><td class="num">${proc.dustExtrKg}</td><td class="num">${proc.sweepKg}</td><td class="num"></td><td>${esc(data.remark || '')}</td></tr></tbody></table></div>`;
     }).join('');
     const html = `
       <!DOCTYPE html>
