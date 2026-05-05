@@ -1,0 +1,6 @@
+{
+  "development": "13.229.26.101:3000",
+  "production": "54.169.140.182:3000",
+  "apiProfile": "auto",
+  "releaseApiHost": "13.229.26.101:3000"
+}

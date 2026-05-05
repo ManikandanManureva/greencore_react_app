@@ -137,3 +137,17 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+[200~# Add ignore rules
+cat >> .gitignore <<'EOF'
+
+# Gradle / Android build artifacts
+.gradle/
+android/.gradle/
+android/build/
+android/app/build/
+# Gradle / Android build artifacts
+.gradle/
+android/.gradle/
+android/build/
+android/app/build/
