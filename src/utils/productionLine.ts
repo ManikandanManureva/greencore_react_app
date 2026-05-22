@@ -31,5 +31,13 @@ export function loginScreenTitleKey(): ProductionLineTitleKey {
   if (raw === 'PET') return 'login.productionLinePET';
   if (raw === 'PC') return 'login.productionLinePC';
   return 'login.appHeadline';
-  console.log('loginScreenTitleKey:', raw);
+}
+
+/** True when the APK is the unified build (all lines on one app — recommended for PPIC / shared tablets). */
+export function isUnifiedProductionBuild(): boolean {
+  const extra = Constants.expoConfig?.extra as { productionLine?: string } | undefined;
+  const raw = (extra?.productionLine || process.env.EXPO_PUBLIC_PRODUCTION_LINE || '')
+    .toString()
+    .trim();
+  return raw === '';
 }

@@ -77,6 +77,7 @@ const LoginScreen = () => {
 
           <Text style={styles.appHeadline}>{t(loginScreenTitleKey())}</Text>
           <Text style={styles.appSubtitle}>{t('login.subtitle')}</Text>
+          <Text style={styles.unifiedHint}>{t('login.unifiedHint')}</Text>
 
           <View style={styles.form}>
             <View style={styles.inputGroup}>
@@ -209,7 +210,15 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     color: '#555',
     textAlign: 'center',
+    marginBottom: 8,
+  },
+  unifiedHint: {
+    fontSize: 12,
+    color: '#17a34a',
+    textAlign: 'center',
     marginBottom: 28,
+    lineHeight: 18,
+    fontWeight: '600',
   },
   form: {
     width: '100%',

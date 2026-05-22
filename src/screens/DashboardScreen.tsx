@@ -336,7 +336,7 @@ function getReprintStationDisplayName(
       return "Extruder-Pellet EVA Super";
     if (slLower === "pellet eva 1" || slRaw === "PV1")
       return "Extruder-Pellet EVA 1";
-    if (slRaw === "Flakes PET") return stationName;
+    if (slRaw === "Flakes PET") return "Boretech";
     if (slRaw) return formatStationLabelDisplay(`${stationName}-${slRaw}`);
     return stationName;
   }
@@ -451,7 +451,7 @@ function buildExportFilenameBase(args: {
 }
 
 const DashboardScreen = ({ navigation }: any) => {
-  const { user, logout, selectedShift } = useAuth();
+  const { user, logout, selectedShift, setSelectedShift } = useAuth();
 
   // PE (Polyethylene) material flow — separate from PC, does not affect PC logic
   const isPE = user?.role?.toLowerCase() === "pe";
@@ -537,6 +537,7 @@ const DashboardScreen = ({ navigation }: any) => {
   // Prevent stale async shift-load responses from overriding the current selected shift.
   const shiftLoadRequestRef = React.useRef(0);
   const selectedShiftIdRef = React.useRef<number | null>(null);
+  const closeShiftInProgressRef = React.useRef(false);
   const [shiftDuration, setShiftDuration] = useState("0h 00m 00s");
   // True when shift is closed — blocks all input/output creation
   const isShiftEnded = shiftEndedAt !== null;
@@ -825,6 +826,11 @@ const DashboardScreen = ({ navigation }: any) => {
     null,
   );
   const [ppicOverviewSearch, setPpicOverviewSearch] = useState("");
+  /** PPIC Station Overview: null = all materials (PC + PE + PET) */
+  const [ppicOverviewMaterialType, setPpicOverviewMaterialType] = useState<
+    string | null
+  >(null);
+  const [ppicMaterialOptions, setPpicMaterialOptions] = useState<string[]>([]);
   const [ppicExportingExcel, setPpicExportingExcel] = useState(false);
 
   // Saved by-products on start shift page (editable after save)
@@ -981,11 +987,23 @@ const DashboardScreen = ({ navigation }: any) => {
     if (user?.role?.toLowerCase() !== "ppic") return;
     (async () => {
       try {
-        const res = await masterDataApi.getShifts();
-        if (res.data?.success && Array.isArray(res.data.data))
-          setPpicShifts(res.data.data);
+        const [shiftsRes, materialsRes] = await Promise.all([
+          masterDataApi.getShifts(),
+          productionApi.getMaterials(),
+        ]);
+        if (shiftsRes.data?.success && Array.isArray(shiftsRes.data.data))
+          setPpicShifts(shiftsRes.data.data);
+        if (materialsRes.data?.success && Array.isArray(materialsRes.data.data)) {
+          const names = materialsRes.data.data
+            .map((m: { name?: string }) => (m.name || "").trim())
+            .filter(Boolean);
+          setPpicMaterialOptions(names);
+        } else {
+          setPpicMaterialOptions([]);
+        }
       } catch (e) {
         setPpicShifts([]);
+        setPpicMaterialOptions([]);
       }
     })();
   }, [user?.role]);
@@ -1018,6 +1036,7 @@ const DashboardScreen = ({ navigation }: any) => {
       const res = await productionApi.getPpicStationOverview(
         date ?? ppicOverviewDate,
         shiftTypeId !== undefined ? shiftTypeId : ppicOverviewShiftId,
+        ppicOverviewMaterialType,
       );
       if (res.data?.success && Array.isArray(res.data.data)) {
         setPpicOverviewData(res.data.data);
@@ -1126,24 +1145,18 @@ const DashboardScreen = ({ navigation }: any) => {
   );
   useFocusEffect(
     useCallback(() => {
-      if (user?.role?.toLowerCase() === "ppic") loadPpicOverview();
-    }, [user?.role]),
-  );
-  useFocusEffect(
-    useCallback(() => {
       if (user?.role?.toLowerCase() !== "ppic") return;
-      // Load initial closed shifts list for PPIC home
       setShowClosedReportsModal(false);
-      setClosedShiftsLoading(true);
-      productionApi
-        .getClosedShifts(100, ppicSelectedDate, undefined)
-        .then((res) => {
-          if (res.data?.success && Array.isArray(res.data.data))
-            setClosedShiftsList(res.data.data);
-          else setClosedShiftsList([]);
-        })
-        .catch(() => setClosedShiftsList([]))
-        .finally(() => setClosedShiftsLoading(false));
+      loadPpicOverview(
+        ppicOverviewDate,
+        ppicOverviewShiftId,
+        ppicOverviewMaterialType,
+      );
+      loadPpicClosedShiftsList(
+        ppicSelectedDate,
+        ppicSelectedShiftId,
+        ppicOverviewMaterialType,
+      );
     }, [user?.role]),
   );
 
@@ -1235,10 +1248,36 @@ const DashboardScreen = ({ navigation }: any) => {
       setSelectedSubLine(null);
       setSelectedSection(null);
 
-      const response = await productionApi.getActiveShift(requestedShiftTypeId);
+      // Load ANY open session for this user first (not only the selected Shift 1/2/3 tab).
+      // Otherwise Shift 2 selected + Shift 1 running in DB shows "Start Shift" incorrectly.
+      const activeAnyRes = await productionApi.getActiveShift();
       if (isStaleRequest()) return;
-      if (response.data.success && response.data.data) {
-        const shift = response.data.data;
+      if (activeAnyRes.data.success && activeAnyRes.data.data) {
+        const shift = activeAnyRes.data.data;
+        const activeTypeId = Number(shift.shift_type_id);
+        if (
+          !isPPIC &&
+          activeTypeId > 0 &&
+          activeTypeId !== requestedShiftTypeId
+        ) {
+          try {
+            const shiftsRes = await masterDataApi.getShifts();
+            const match = (shiftsRes.data?.data ?? []).find(
+              (s: Shift) => Number(s.id) === activeTypeId,
+            );
+            if (match) {
+              await setSelectedShift(match);
+              selectedShiftIdRef.current = Number(match.id);
+              showToast(
+                t("messages.resumedOpenShift", {
+                  shiftName: match.name ?? shift.shift_type_name ?? "",
+                }),
+              );
+            }
+          } catch (_) {
+            /* use session anyway */
+          }
+        }
         setIsShiftActive(true);
         setShiftStartTime(new Date(shift.start_time).getTime());
         setShiftEndedAt(null);
@@ -1259,9 +1298,13 @@ const DashboardScreen = ({ navigation }: any) => {
               latest.shift_type_id != null &&
               Number(latest.shift_type_id) === requestedShiftTypeId;
             if (isSameShiftType && !latest.is_active && latest.end_time) {
-              // PC operator flow only: show only the shift data view (no Start Shift button)
+              // Operator: show Start Shift so a new session can begin (do not auto-open closed report).
               if (!isPPIC) {
-                await handleSelectAnyShift(latest.id, false);
+                setIsShiftActive(false);
+                setBackendShiftId(null);
+                setShiftStartTime(null);
+                setShiftEndedAt(null);
+                setShiftLogs([]);
                 return;
               }
               // Existing flow (PPIC / others): keep original "Shift Closed" state
@@ -1557,6 +1600,27 @@ const DashboardScreen = ({ navigation }: any) => {
   const handleStartShift = async () => {
     if (!selectedShift) return;
     try {
+      const existing = await productionApi.getActiveShift();
+      if (existing.data?.success && existing.data.data) {
+        const open = existing.data.data;
+        const openTypeId = Number(open.shift_type_id);
+        if (openTypeId > 0 && openTypeId !== Number(selectedShift.id)) {
+          const shiftsRes = await masterDataApi.getShifts();
+          const match = (shiftsRes.data?.data ?? []).find(
+            (s: Shift) => Number(s.id) === openTypeId,
+          );
+          Alert.alert(
+            t("messages.activeShiftBlockingTitle"),
+            t("messages.activeShiftOpenOnOtherTab", {
+              shiftName:
+                match?.name ?? open.shift_type_name ?? String(openTypeId),
+            }),
+          );
+          return;
+        }
+        await loadShiftState();
+        return;
+      }
       setIsLoading(true);
       // Clear saved by-products when starting new shift
       setSavedByProductsOnStartPage([]);
@@ -1582,7 +1646,24 @@ const DashboardScreen = ({ navigation }: any) => {
     } catch (error: any) {
       const message =
         error.response?.data?.message || t("messages.failedToStartShift");
-      showToast(message);
+      const isBlockedByOpenSession =
+        typeof message === "string" &&
+        message.toLowerCase().includes("active shift");
+      if (isBlockedByOpenSession) {
+        Alert.alert(
+          t("messages.activeShiftBlockingTitle"),
+          t("messages.activeShiftBlockingMessage"),
+          [
+            { text: t("common.cancel"), style: "cancel" },
+            {
+              text: t("dashboard.changeShift"),
+              onPress: () => navigation.navigate("ShiftSelection"),
+            },
+          ],
+        );
+      } else {
+        showToast(message);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -1968,7 +2049,8 @@ const DashboardScreen = ({ navigation }: any) => {
   };
 
   const handleCloseShift = async () => {
-    if (!backendShiftId) return;
+    if (!backendShiftId || closeShiftInProgressRef.current) return;
+    closeShiftInProgressRef.current = true;
     try {
       setIsLoading(true);
       const toSave = byProductsInputs.filter((p) => Number(p.weight) > 0);
@@ -2036,74 +2118,109 @@ const DashboardScreen = ({ navigation }: any) => {
         weight: Number(p.weight),
         processLabel: p.processLabel ?? "",
       }));
-      await printService.printShiftSummary({
+      const shiftIdToClose = backendShiftId;
+      const remarkTrimmed = endShiftRemark.trim() || undefined;
+
+      // 1) Close in DB first — by-products and print must never block this (PET/PC/PE)
+      const response = await productionApi.endShift(
+        shiftIdToClose,
+        remarkTrimmed,
+      );
+      if (!response.data?.success) {
+        Alert.alert(t("common.error"), t("messages.failedToCloseShift"));
+        return;
+      }
+
+      // Verify closed (retry once if still active — network/race)
+      try {
+        const statusRes = await productionApi.getShiftStatus(shiftIdToClose);
+        if (statusRes.data?.success && statusRes.data.data?.is_active) {
+          await productionApi.endShift(shiftIdToClose, remarkTrimmed);
+        }
+      } catch (_) {
+        /* ignore verify errors */
+      }
+
+      // 2) Save by-products (best effort — shift is already closed)
+      try {
+        await productionApi.updateByProducts(
+          shiftIdToClose,
+          toSave.map((p) => ({
+            stationId: p.stationId,
+            name: p.name,
+            weight:
+              typeof p.weight === "number" ? p.weight : Number(p.weight) || 0,
+            category: p.category ?? "",
+          })),
+        );
+      } catch (bpErr) {
+        console.warn("Shift closed; by-products save failed:", bpErr);
+        Alert.alert(
+          t("messages.shiftClosedByProductsFailedTitle"),
+          t("messages.shiftClosedByProductsFailedMessage"),
+        );
+      }
+
+      const savedShiftId = shiftIdToClose;
+      const savedMeta = {
         shift: selectedShift?.name ?? "N/A",
         operator: user?.name ?? "N/A",
         date: new Date().toLocaleDateString(),
         totalOutputs,
         totalWeight,
         byStation,
-        byProducts: byProductsForPdf,
-        remark: endShiftRemark.trim() || undefined,
-      });
-      // Use PUT (delete + reinsert) so retrying shift close never creates duplicate by-product rows
-      await productionApi.updateByProducts(
-        backendShiftId,
-        toSave.map((p) => ({
-          stationId: p.stationId,
-          name: p.name,
-          weight:
-            typeof p.weight === "number" ? p.weight : Number(p.weight) || 0,
-          category: p.category ?? "",
-        })),
-      );
-      const response = await productionApi.endShift(
-        backendShiftId,
-        endShiftRemark.trim() || undefined,
-      );
-      if (response.data.success) {
-        const savedShiftId = backendShiftId;
-        const savedMeta = {
-          shift: selectedShift?.name ?? "N/A",
-          operator: user?.name ?? "N/A",
-          date: new Date().toLocaleDateString(),
+        remark: remarkTrimmed,
+        materialTypeName: isPE ? "PE" : isPET ? "PET" : "PC",
+      };
+      const savedByProducts = byProductsForPdf.map((p, i) => ({
+        ...p,
+        stationId: toSave[i].stationId,
+        processLabel: toSave[i].processLabel,
+      }));
+      const fullTemplate = getFullWasteTemplate();
+      const mergedForStartPage =
+        fullTemplate.length > 0
+          ? mergeSavedByProductsIntoFullTemplate(fullTemplate, savedByProducts)
+          : savedByProducts;
+
+      setClosedShiftId(savedShiftId);
+      setSavedByProductsMeta(savedMeta);
+      setSavedByProductsOnStartPage(mergedForStartPage);
+      setShowEndShiftSummary(false);
+      setEndShiftRemark("");
+      setIsShiftActive(false);
+      setBackendShiftId(null);
+      setShiftStartTime(null);
+      setShiftEndedAt(null);
+      setShiftLogs([]);
+      setAutoCloseWarningShown(false);
+      setShowShiftClosedView(false);
+      setViewingActiveShift(false);
+
+      // Print/PDF after DB close — failure does not leave shift open
+      try {
+        await printService.printShiftSummary({
+          shift: savedMeta.shift,
+          operator: savedMeta.operator,
+          date: savedMeta.date,
           totalOutputs,
           totalWeight,
           byStation,
-          remark: endShiftRemark.trim() || undefined,
-          materialTypeName: isPE ? "PE" : isPET ? "PET" : "PC",
-        };
-        const savedByProducts = byProductsForPdf.map((p, i) => ({
-          ...p,
-          stationId: toSave[i].stationId,
-          processLabel: toSave[i].processLabel,
-        }));
-        const fullTemplate = getFullWasteTemplate();
-        const mergedForStartPage =
-          fullTemplate.length > 0
-            ? mergeSavedByProductsIntoFullTemplate(
-                fullTemplate,
-                savedByProducts,
-              )
-            : savedByProducts;
-
-        // Store for start shift page display (all labels so user can edit/add)
-        setClosedShiftId(savedShiftId);
-        setSavedByProductsMeta(savedMeta);
-        setSavedByProductsOnStartPage(mergedForStartPage);
-
-        setShowEndShiftSummary(false);
-        setEndShiftRemark("");
-        setIsShiftActive(false);
-        setBackendShiftId(null);
-        setShiftLogs([]);
-        setAutoCloseWarningShown(false);
-        // Don't show shift closed view, redirect to start shift page instead
+          byProducts: byProductsForPdf,
+          remark: remarkTrimmed,
+        });
+      } catch (printErr) {
+        console.warn("Shift closed but print/PDF failed:", printErr);
+        Alert.alert(
+          t("messages.shiftClosedPrintFailedTitle"),
+          t("messages.shiftClosedPrintFailedMessage"),
+        );
       }
     } catch (error) {
       Alert.alert(t("common.error"), t("messages.failedToCloseShift"));
     } finally {
       setIsLoading(false);
+      closeShiftInProgressRef.current = false;
     }
   };
 
@@ -2191,11 +2308,11 @@ const DashboardScreen = ({ navigation }: any) => {
     }
   };
 
-  const handleOpenClosedReports = async (
+  const loadPpicClosedShiftsList = async (
     useDate?: string,
     useShiftId?: number | null,
+    useMaterial?: string | null,
   ) => {
-    setShowClosedReportsModal(true);
     setClosedShiftsLoading(true);
     try {
       const limit = 100;
@@ -2211,7 +2328,14 @@ const DashboardScreen = ({ navigation }: any) => {
         shiftTypeIdRaw != null && shiftTypeIdRaw >= 1 && shiftTypeIdRaw <= 3
           ? Number(shiftTypeIdRaw)
           : undefined;
-      const res = await productionApi.getClosedShifts(limit, date, shiftTypeId);
+      const materialFilter =
+        useMaterial !== undefined ? useMaterial : ppicOverviewMaterialType;
+      const res = await productionApi.getClosedShifts(
+        limit,
+        date,
+        shiftTypeId,
+        materialFilter,
+      );
       if (res.data?.success && Array.isArray(res.data.data)) {
         setClosedShiftsList(res.data.data);
       } else {
@@ -2222,6 +2346,31 @@ const DashboardScreen = ({ navigation }: any) => {
     } finally {
       setClosedShiftsLoading(false);
     }
+  };
+
+  const handleOpenClosedReports = async (
+    useDate?: string,
+    useShiftId?: number | null,
+    useMaterial?: string | null,
+  ) => {
+    setShowClosedReportsModal(true);
+    await loadPpicClosedShiftsList(useDate, useShiftId, useMaterial);
+  };
+
+  const refreshPpicHomeData = (
+    date?: string,
+    shiftId?: number | null,
+    material?: string | null,
+  ) => {
+    const d = date ?? ppicSelectedDate;
+    const sh = shiftId !== undefined ? shiftId : ppicSelectedShiftId;
+    const mat = material !== undefined ? material : ppicOverviewMaterialType;
+    if (date) {
+      setPpicSelectedDate(date);
+      setPpicOverviewDate(date);
+    }
+    loadPpicClosedShiftsList(d, sh, mat);
+    loadPpicOverview(d, sh, mat);
   };
 
   const handleSelectClosedShift = async (shiftId: number) => {
@@ -3800,6 +3949,11 @@ const DashboardScreen = ({ navigation }: any) => {
               (selectedStation as any).displayName ||
               selectedStation.name ||
               "Final Packing";
+          } else if (isExtrusionPackagingStation(selectedStation)) {
+            stationDisplay =
+              (selectedStation as any).displayName ||
+              response.data.data.details?.stationName ||
+              "Boretech";
           }
         } else if (
           isPE &&
@@ -4518,6 +4672,13 @@ const DashboardScreen = ({ navigation }: any) => {
     }
   };
 
+  /** Read-only shift label in header (no shift switching from dashboard) */
+  const shiftHeaderText = (
+    <Text style={styles.headerShiftText} numberOfLines={1}>
+      {selectedShift?.name ?? "Shift 1"}
+    </Text>
+  );
+
   if (isLoading && !isShiftActive)
     return (
       <View style={styles.loadingContainer}>
@@ -4547,22 +4708,7 @@ const DashboardScreen = ({ navigation }: any) => {
       <View style={styles.header}>
         <View style={styles.headerLeft}>
           {!selectedStation && !showEndShiftSummary && !showShiftClosedView ? (
-            isPPIC ? null : (
-              <TouchableOpacity
-                onPress={() => {
-                  setSavedByProductsOnStartPage([]);
-                  setSavedByProductsMeta(null);
-                  setClosedShiftId(null);
-                  navigation.navigate("ShiftSelection");
-                }}
-                style={styles.headerPill}
-              >
-                <Text style={styles.pillLabel}>Shift</Text>
-                <Text style={styles.pillValue}>
-                  {selectedShift?.name || "Shift 1"}
-                </Text>
-              </TouchableOpacity>
-            )
+            isPPIC ? null : shiftHeaderText
           ) : showShiftClosedView && !isPPIC ? (
             <View
               style={{ flexDirection: "row", alignItems: "center", gap: 12 }}
@@ -4578,18 +4724,7 @@ const DashboardScreen = ({ navigation }: any) => {
                   </View>
                 </View>
               </TouchableOpacity>
-              <TouchableOpacity
-                onPress={() => {
-                  setClosedShiftId(null);
-                  navigation.navigate("ShiftSelection");
-                }}
-                style={[styles.headerPill, { marginLeft: 8 }]}
-              >
-                <Text style={styles.pillLabel}>Shift</Text>
-                <Text style={styles.pillValue}>
-                  {selectedShift?.name || "Shift 1"}
-                </Text>
-              </TouchableOpacity>
+              <View style={{ marginLeft: 8 }}>{shiftHeaderText}</View>
             </View>
           ) : (
             <View
@@ -4626,20 +4761,9 @@ const DashboardScreen = ({ navigation }: any) => {
                 </View>
               </TouchableOpacity>
               {!isPPIC && (
-                <TouchableOpacity
-                  onPress={() => {
-                    setSavedByProductsOnStartPage([]);
-                    setSavedByProductsMeta(null);
-                    setClosedShiftId(null);
-                    navigation.navigate("ShiftSelection");
-                  }}
-                  style={[styles.headerPill, { marginLeft: 4, flexShrink: 0 }]}
-                >
-                  <Text style={styles.pillLabel}>Shift</Text>
-                  <Text style={styles.pillValue}>
-                    {selectedShift?.name || "Shift 1"}
-                  </Text>
-                </TouchableOpacity>
+                <View style={{ marginLeft: 4, flexShrink: 0 }}>
+                  {shiftHeaderText}
+                </View>
               )}
             </View>
           )}
@@ -5568,11 +5692,152 @@ const DashboardScreen = ({ navigation }: any) => {
             {user?.role?.toLowerCase() === "ppic" ? (
               <View style={styles.ppicHomeContainer}>
                 <Text style={styles.ppicHomeTitle}>
-                  {t(productionLineTitleKeyFromRole(user?.role))}
+                  {t("login.appHeadline")}
                 </Text>
                 <Text style={styles.ppicHomeSubtitle}>
-                  {t("dashboard.ppicHomeSubtitle")}
+                  {t("dashboard.ppicAllLinesSubtitle")}
                 </Text>
+
+                {/* Global filters: date + line (PC/PE/PET) — applies to all sections below */}
+                <View style={[styles.ppicHomeCard, { marginTop: 12 }]}>
+                  <Text style={styles.ppicHomeLabel}>
+                    {t("dashboard.ppicSelectDate")}
+                  </Text>
+                  <StationDatePicker
+                    value={parseDateLocal(ppicOverviewDate)}
+                    onChange={(date) => {
+                      const d = formatDateLocal(date);
+                      setPpicOverviewDate(d);
+                      setPpicSelectedDate(d);
+                      setPpicExpandedStation(null);
+                      refreshPpicHomeData(d, ppicOverviewShiftId, ppicOverviewMaterialType);
+                    }}
+                    maximumDate={maxDate}
+                  />
+                  <Text style={[styles.ppicHomeLabel, { marginTop: 12 }]}>
+                    {t("dashboard.ppicFilterMaterial")}
+                  </Text>
+                  <View style={styles.ppicShiftRow}>
+                    <TouchableOpacity
+                      style={[
+                        styles.ppicShiftBtn,
+                        ppicOverviewMaterialType === null &&
+                          styles.ppicShiftBtnActive,
+                      ]}
+                      onPress={() => {
+                        setPpicOverviewMaterialType(null);
+                        setPpicExpandedStation(null);
+                        refreshPpicHomeData(
+                          ppicOverviewDate,
+                          ppicOverviewShiftId,
+                          null,
+                        );
+                      }}
+                    >
+                      <Text
+                        style={[
+                          styles.ppicShiftBtnText,
+                          ppicOverviewMaterialType === null &&
+                            styles.ppicShiftBtnTextActive,
+                        ]}
+                      >
+                        {t("dashboard.all")}
+                      </Text>
+                    </TouchableOpacity>
+                    {(ppicMaterialOptions.length > 0
+                      ? ppicMaterialOptions
+                      : ["PC", "PE", "PET"]
+                    ).map((mat) => (
+                      <TouchableOpacity
+                        key={`ppic-mat-${mat}`}
+                        style={[
+                          styles.ppicShiftBtn,
+                          ppicOverviewMaterialType === mat &&
+                            styles.ppicShiftBtnActive,
+                        ]}
+                        onPress={() => {
+                          setPpicOverviewMaterialType(mat);
+                          setPpicExpandedStation(null);
+                          refreshPpicHomeData(
+                            ppicOverviewDate,
+                            ppicOverviewShiftId,
+                            mat,
+                          );
+                        }}
+                      >
+                        <Text
+                          style={[
+                            styles.ppicShiftBtnText,
+                            ppicOverviewMaterialType === mat &&
+                              styles.ppicShiftBtnTextActive,
+                          ]}
+                        >
+                          {mat}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  <Text style={[styles.ppicHomeLabel, { marginTop: 12 }]}>
+                    {t("dashboard.ppicSelectShift")}
+                  </Text>
+                  <View style={styles.ppicShiftRow}>
+                    <TouchableOpacity
+                      style={[
+                        styles.ppicShiftBtn,
+                        ppicOverviewShiftId === null &&
+                          styles.ppicShiftBtnActive,
+                      ]}
+                      onPress={() => {
+                        setPpicOverviewShiftId(null);
+                        setPpicSelectedShiftId(null);
+                        refreshPpicHomeData(
+                          ppicOverviewDate,
+                          null,
+                          ppicOverviewMaterialType,
+                        );
+                      }}
+                    >
+                      <Text
+                        style={[
+                          styles.ppicShiftBtnText,
+                          ppicOverviewShiftId === null &&
+                            styles.ppicShiftBtnTextActive,
+                        ]}
+                      >
+                        {t("dashboard.all")}
+                      </Text>
+                    </TouchableOpacity>
+                    {ppicShifts.map((s) => (
+                      <TouchableOpacity
+                        key={`ppic-sh-${s.id}`}
+                        style={[
+                          styles.ppicShiftBtn,
+                          ppicOverviewShiftId === s.id &&
+                            styles.ppicShiftBtnActive,
+                        ]}
+                        onPress={() => {
+                          setPpicOverviewShiftId(s.id);
+                          setPpicSelectedShiftId(s.id);
+                          refreshPpicHomeData(
+                            ppicOverviewDate,
+                            s.id,
+                            ppicOverviewMaterialType,
+                          );
+                        }}
+                      >
+                        <Text
+                          style={[
+                            styles.ppicShiftBtnText,
+                            ppicOverviewShiftId === s.id &&
+                              styles.ppicShiftBtnTextActive,
+                          ]}
+                        >
+                          {s.name}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
 
                 {/* ── Active / Ongoing Shifts ── */}
                 <View style={styles.ppicSectionHeader}>
@@ -5637,6 +5902,7 @@ const DashboardScreen = ({ navigation }: any) => {
                           </View>
                           <Text style={styles.ppicActiveShiftOperator}>
                             Operator: {s.operatorName}
+                            {s.materialType ? ` · ${s.materialType}` : ""}
                           </Text>
                           <Text style={styles.ppicActiveShiftMeta}>
                             {s.outputsSoFar} outputs · {s.weightSoFar} kg
@@ -5661,9 +5927,10 @@ const DashboardScreen = ({ navigation }: any) => {
                   </Text>
                   <TouchableOpacity
                     onPress={() =>
-                      handleOpenClosedReports(
-                        ppicSelectedDate,
-                        ppicSelectedShiftId,
+                      refreshPpicHomeData(
+                        ppicOverviewDate,
+                        ppicOverviewShiftId,
+                        ppicOverviewMaterialType,
                       )
                     }
                     style={{ marginLeft: "auto" }}
@@ -5678,76 +5945,6 @@ const DashboardScreen = ({ navigation }: any) => {
                       Refresh
                     </Text>
                   </TouchableOpacity>
-                </View>
-
-                {/* Date filter */}
-                <View style={styles.ppicHomeCard}>
-                  <Text style={styles.ppicHomeLabel}>
-                    {t("dashboard.ppicSelectDate")}
-                  </Text>
-                  <StationDatePicker
-                    value={parseDateLocal(ppicSelectedDate)}
-                    onChange={(date) => {
-                      const d = formatDateLocal(date);
-                      setPpicSelectedDate(d);
-                      handleOpenClosedReports(d, ppicSelectedShiftId);
-                    }}
-                    maximumDate={maxDate}
-                  />
-                </View>
-
-                {/* Shift filter */}
-                <View style={styles.ppicHomeCard}>
-                  <Text style={styles.ppicHomeLabel}>
-                    {t("dashboard.ppicSelectShift")}
-                  </Text>
-                  <View style={styles.ppicShiftRow}>
-                    <TouchableOpacity
-                      style={[
-                        styles.ppicShiftBtn,
-                        ppicSelectedShiftId === null &&
-                          styles.ppicShiftBtnActive,
-                      ]}
-                      onPress={() => {
-                        setPpicSelectedShiftId(null);
-                        handleOpenClosedReports(ppicSelectedDate, null);
-                      }}
-                    >
-                      <Text
-                        style={[
-                          styles.ppicShiftBtnText,
-                          ppicSelectedShiftId === null &&
-                            styles.ppicShiftBtnTextActive,
-                        ]}
-                      >
-                        {t("dashboard.all")}
-                      </Text>
-                    </TouchableOpacity>
-                    {ppicShifts.map((s) => (
-                      <TouchableOpacity
-                        key={s.id}
-                        style={[
-                          styles.ppicShiftBtn,
-                          ppicSelectedShiftId === s.id &&
-                            styles.ppicShiftBtnActive,
-                        ]}
-                        onPress={() => {
-                          setPpicSelectedShiftId(s.id);
-                          handleOpenClosedReports(ppicSelectedDate, s.id);
-                        }}
-                      >
-                        <Text
-                          style={[
-                            styles.ppicShiftBtnText,
-                            ppicSelectedShiftId === s.id &&
-                              styles.ppicShiftBtnTextActive,
-                          ]}
-                        >
-                          {s.name}
-                        </Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
                 </View>
 
                 {/* Inline list of closed shifts */}
@@ -5892,7 +6089,15 @@ const DashboardScreen = ({ navigation }: any) => {
                         </Text>
                       </View>
                     </TouchableOpacity>
-                    <TouchableOpacity onPress={() => loadPpicOverview()}>
+                    <TouchableOpacity
+                      onPress={() =>
+                        loadPpicOverview(
+                          ppicOverviewDate,
+                          ppicOverviewShiftId,
+                          ppicOverviewMaterialType,
+                        )
+                      }
+                    >
                       <Text
                         style={{
                           fontSize: 12,
@@ -5903,73 +6108,6 @@ const DashboardScreen = ({ navigation }: any) => {
                         Refresh
                       </Text>
                     </TouchableOpacity>
-                  </View>
-                </View>
-
-                {/* Date Picker */}
-                <View style={styles.ppicHomeCard}>
-                  <Text style={styles.ppicHomeLabel}>Select Date</Text>
-                  <StationDatePicker
-                    value={parseDateLocal(ppicOverviewDate)}
-                    onChange={(date) => {
-                      const d = formatDateLocal(date);
-                      setPpicOverviewDate(d);
-                      setPpicExpandedStation(null);
-                      loadPpicOverview(d, ppicOverviewShiftId);
-                    }}
-                    maximumDate={maxDate}
-                  />
-                </View>
-
-                {/* Shift Filter */}
-                <View style={styles.ppicHomeCard}>
-                  <Text style={styles.ppicHomeLabel}>Filter by Shift</Text>
-                  <View style={styles.ppicShiftRow}>
-                    <TouchableOpacity
-                      style={[
-                        styles.ppicShiftBtn,
-                        ppicOverviewShiftId === null &&
-                          styles.ppicShiftBtnActive,
-                      ]}
-                      onPress={() => {
-                        setPpicOverviewShiftId(null);
-                        loadPpicOverview(ppicOverviewDate, null);
-                      }}
-                    >
-                      <Text
-                        style={[
-                          styles.ppicShiftBtnText,
-                          ppicOverviewShiftId === null &&
-                            styles.ppicShiftBtnTextActive,
-                        ]}
-                      >
-                        All
-                      </Text>
-                    </TouchableOpacity>
-                    {ppicShifts.map((s) => (
-                      <TouchableOpacity
-                        key={s.id}
-                        style={[
-                          styles.ppicShiftBtn,
-                          ppicOverviewShiftId === s.id &&
-                            styles.ppicShiftBtnActive,
-                        ]}
-                        onPress={() => {
-                          setPpicOverviewShiftId(s.id);
-                          loadPpicOverview(ppicOverviewDate, s.id);
-                        }}
-                      >
-                        <Text
-                          style={[
-                            styles.ppicShiftBtnText,
-                            ppicOverviewShiftId === s.id &&
-                              styles.ppicShiftBtnTextActive,
-                          ]}
-                        >
-                          {s.name}
-                        </Text>
-                      </TouchableOpacity>
-                    ))}
                   </View>
                 </View>
 
@@ -6026,6 +6164,9 @@ const DashboardScreen = ({ navigation }: any) => {
                                 .toLowerCase()
                                 .includes(q) ||
                               (l.shift_name || "").toLowerCase().includes(q) ||
+                              (l.material_type_name || "")
+                                .toLowerCase()
+                                .includes(q) ||
                               String(l.remark || "")
                                 .toLowerCase()
                                 .includes(q),
@@ -6044,7 +6185,11 @@ const DashboardScreen = ({ navigation }: any) => {
                       const sname = (station.station_name || "").toLowerCase();
                       const colorKey = sname.includes("label")
                         ? "label"
-                        : sname.includes("crush")
+                        : sname.includes("boretech")
+                          ? "extrusion"
+                          : sname.includes("starlinger")
+                            ? "packing"
+                          : sname.includes("crush")
                           ? "crusher"
                           : sname.includes("wash")
                             ? "washing"
@@ -6199,6 +6344,16 @@ const DashboardScreen = ({ navigation }: any) => {
                                             >
                                               {log.status}
                                             </Text>
+                                            {log.material_type_name ? (
+                                              <Text
+                                                style={[
+                                                  styles.shiftLogMeta,
+                                                  { color: "#64748b", fontWeight: "600" },
+                                                ]}
+                                              >
+                                                {log.material_type_name}
+                                              </Text>
+                                            ) : null}
                                             {log.shift_name ? (
                                               <Text
                                                 style={[
@@ -19743,18 +19898,12 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   headerRight: { flexDirection: "row", alignItems: "center", flexShrink: 0 },
-  headerPill: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#F0F0F0",
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
+  headerShiftText: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#333",
     marginRight: 8,
-    gap: 4,
   },
-  pillLabel: { fontSize: 10, color: "#666" },
-  pillValue: { fontSize: 12, fontWeight: "700", color: "#333" },
   userName: { fontSize: 14, fontWeight: "600", color: "#333", marginRight: 8 },
   logoutButton: { padding: 8 },
   headerExportButton: { padding: 8, marginRight: 4 },

@@ -8,7 +8,12 @@ export const productionApi = {
     client.post('/production/start-shift', { shiftTypeId }),
   endShift: (shiftId: number, remark?: string, waste?: { stationId: number; subLine: string; wasteType: string; weight: number }[]) =>
     client.post(`/production/end-shift/${shiftId}`, { remark: remark ?? undefined, waste: waste ?? undefined }),
-  getClosedShifts: (limit?: number, date?: string, shiftTypeId?: number) => {
+  getClosedShifts: (
+    limit?: number,
+    date?: string,
+    shiftTypeId?: number,
+    materialType?: string | null,
+  ) => {
     const num = shiftTypeId != null ? Number(shiftTypeId) : undefined;
     const validShift = num != null && !Number.isNaN(num) && num >= 1 && num <= 3 ? num : undefined;
     return client.get('/production/closed-shifts', {
@@ -16,6 +21,7 @@ export const productionApi = {
         ...(limit != null && { limit }),
         ...(date && { date }),
         ...(validShift != null && { shiftTypeId: validShift }),
+        ...(materialType && materialType !== 'all' && { material_type: materialType }),
       },
     });
   },
@@ -35,8 +41,13 @@ export const productionApi = {
     client.get('/production/latest-shift'),
   getShiftLogs: (shiftId: number) =>
     client.get(`/production/logs/${shiftId}`),
-  getActiveShift: (shiftTypeId?: number) =>
-    client.get('/production/active-shift', { params: { shiftTypeId } }),
+  getActiveShift: (shiftTypeId?: number) => {
+    const params: Record<string, number> = {};
+    if (shiftTypeId != null && !Number.isNaN(Number(shiftTypeId))) {
+      params.shiftTypeId = Number(shiftTypeId);
+    }
+    return client.get('/production/active-shift', { params });
+  },
   getNextQr: (stationId: number, shiftId: number, subLine?: string, shiftTypeId?: number) =>
     client.get('/production/next-qr', { params: { stationId, shiftId, subLine, shiftTypeId } }),
   logProduction: (data: any) =>
@@ -87,9 +98,14 @@ export const productionApi = {
     if (stationId != null) params.station_id = stationId;
     return client.get('/production/final-packing-logs', { params });
   },
-  getPpicStationOverview: (date?: string, shiftTypeId?: number | null) => {
-    const params: any = { date };
+  getPpicStationOverview: (
+    date?: string,
+    shiftTypeId?: number | null,
+    materialType?: string | null,
+  ) => {
+    const params: Record<string, string | number> = { date: date ?? '' };
     if (shiftTypeId) params.shift_type_id = shiftTypeId;
+    if (materialType && materialType !== 'all') params.material_type = materialType;
     return client.get('/production/ppic-station-overview', { params });
   },
   /** Backoffice-style grouped logs; omit `material_type` to include all materials (PC, PE, PET, …). */

@@ -6,6 +6,7 @@ import {
   TouchableOpacity,
   ScrollView,
   ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Clock, AlertCircle, Check, Lock, ShieldCheck, BarChart2 } from 'lucide-react-native';
@@ -69,6 +70,8 @@ const ShiftSelectionScreen = ({ navigation }: any) => {
   const [timeShift, setTimeShift]     = useState<Shift | null>(null); // shift matching clock
   const [selectedShiftLocal, setSelectedShiftLocal] = useState<Shift | null>(null);
   const [error, setError]             = useState<string | null>(null);
+  /** Open operator session (any shift type) — blocks starting another until closed */
+  const [openSessionShift, setOpenSessionShift] = useState<Shift | null>(null);
 
   useFocusEffect(
     useCallback(() => {
@@ -80,6 +83,7 @@ const ShiftSelectionScreen = ({ navigation }: any) => {
     try {
       setIsLoading(true);
       setError(null);
+      setOpenSessionShift(null);
 
       const [shiftsRes, activeRes] = await Promise.all([
         masterDataApi.getShifts(),
@@ -101,11 +105,15 @@ const ShiftSelectionScreen = ({ navigation }: any) => {
         return;
       }
 
-      // Operator: if already has an open session → skip to Dashboard
+      // Operator: resume open session — go straight to dashboard (same DB session since morning)
       if (activeRes.data.success && activeRes.data.data) {
         const session   = activeRes.data.data;
-        const shiftType = fetchedShifts.find((s) => s.id === session.shift_type_id);
+        const shiftType = fetchedShifts.find(
+          (s) => Number(s.id) === Number(session.shift_type_id),
+        );
         if (shiftType) {
+          setOpenSessionShift(shiftType);
+          setSelectedShiftLocal(shiftType);
           await setSelectedShift(shiftType);
           navigation.replace('Dashboard');
           return;
@@ -135,6 +143,22 @@ const ShiftSelectionScreen = ({ navigation }: any) => {
     if (isShiftUpcoming(shift)) return;
     setSelectedShiftLocal(shift);
     await setSelectedShift(shift);
+  };
+
+  const tryContinueToDashboard = () => {
+    if (
+      !isPpic &&
+      openSessionShift &&
+      selectedShiftLocal &&
+      openSessionShift.id !== selectedShiftLocal.id
+    ) {
+      Alert.alert(
+        t('messages.activeShiftBlockingTitle'),
+        t('messages.activeShiftBlockingMessage'),
+      );
+      return;
+    }
+    navigation.replace('Dashboard');
   };
 
   const now     = new Date();
@@ -208,6 +232,14 @@ const ShiftSelectionScreen = ({ navigation }: any) => {
                 <Clock color="#17a34a" size={14} />
                 <Text style={styles.operatorHintText}>
                   Select the current shift or a previous (closed) shift. Upcoming shifts are locked.
+                </Text>
+              </View>
+            )}
+            {!isPpic && openSessionShift && (
+              <View style={styles.openSessionBanner}>
+                <AlertCircle color="#b45309" size={16} />
+                <Text style={styles.openSessionText}>
+                  {openSessionShift.name} is still open. Close it on the dashboard before starting another shift.
                 </Text>
               </View>
             )}
@@ -292,10 +324,7 @@ const ShiftSelectionScreen = ({ navigation }: any) => {
               isPpic && styles.continueBtnPpic,
             ]}
             disabled={!canProceed}
-            onPress={() => {
-              // Always go to a fresh Dashboard render after shift selection.
-              navigation.replace('Dashboard');
-            }}
+            onPress={tryContinueToDashboard}
           >
             <View style={styles.continueBtnInner}>
               {isPpic && <BarChart2 color="#FFF" size={18} style={{ marginRight: 8 }} />}
@@ -341,6 +370,8 @@ const styles = StyleSheet.create({
   noShiftText:    { flex: 1, fontSize: 12, color: '#92400e', lineHeight: 16 },
   operatorHint:   { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#f0fdf4', borderWidth: 1, borderColor: '#86efac', borderRadius: 8, padding: 10, marginBottom: 12 },
   operatorHintText: { flex: 1, fontSize: 12, color: '#166534', lineHeight: 16 },
+  openSessionBanner: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#fffbeb', borderWidth: 1, borderColor: '#fcd34d', borderRadius: 8, padding: 10, marginBottom: 12 },
+  openSessionText: { flex: 1, fontSize: 12, color: '#92400e', lineHeight: 16 },
   ppicHint:       { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#eff6ff', borderWidth: 1, borderColor: '#bfdbfe', borderRadius: 8, padding: 10, marginBottom: 12 },
   ppicHintText:   { flex: 1, fontSize: 12, color: '#1e40af', lineHeight: 16 },
 
