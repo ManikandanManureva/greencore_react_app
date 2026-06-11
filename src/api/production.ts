@@ -114,6 +114,7 @@ export const productionApi = {
     date_end: string;
     station_code?: string;
     shift_type?: string;
+    operator_id?: number | string;
     limit?: number;
   }) => {
     const params: Record<string, string | number> = {
@@ -123,8 +124,12 @@ export const productionApi = {
     };
     if (query.station_code) params.station_code = query.station_code;
     if (query.shift_type) params.shift_type = query.shift_type;
+    if (query.operator_id != null && query.operator_id !== 'all')
+      params.operator_id = query.operator_id;
     return client.get('/production/logs-all', { params });
   },
+  /** Distinct production operators (users with recorded logs) — for PPIC export filter. */
+  getProductionOperators: () => client.get('/production/operators'),
   updateLogStatus: (outputBagQr: string, status: string, washingLine?: string, extrusionLine?: string, usedLine?: string) => {
     const body: any = { outputBagQr, status };
     if (usedLine) {

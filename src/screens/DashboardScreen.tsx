@@ -69,6 +69,15 @@ function isExtrusionPackagingStation(s: Station | null | undefined): boolean {
   );
 }
 
+/** Pellet Packing (PLT) — final station after Final Packaging; inputs = PKG + EXT outputs. */
+function isPelletPackingStation(s: Station | null | undefined): boolean {
+  if (!s) return false;
+  const code = String((s as any).code || "").toUpperCase();
+  if (code === "PLT") return true;
+  const n = (s.name || "").trim().toLowerCase();
+  return n.includes("pellet pack");
+}
+
 /**
  * PET Starlinger (pellets) — not Boretech. Includes legacy DB name "Re-Packaging" when it is the Starlinger step
  * before a separate Final Packaging station.
@@ -88,6 +97,12 @@ function isPetStarlingerLine(s: Station | null | undefined): boolean {
  */
 function isPetFinalPackingLine(s: Station | null | undefined): boolean {
   if (!s || isExtrusionPackagingStation(s)) return false;
+  // Pellet Packing (PLT) is its own final station — name contains "packing" but it is NOT the PET Final Packing line.
+  if (
+    String((s as any).code || "").toUpperCase() === "PLT" ||
+    (s.name || "").toLowerCase().includes("pellet")
+  )
+    return false;
   if ((s as any).petUiSegment === "starlinger") return false;
   const n = (s.name || "").toLowerCase();
   if (n.includes("starlinger") || n.includes("re-packaging")) return false;
@@ -416,6 +431,9 @@ function isShiftPrevious(shift: Shift): boolean {
  */
 function buildExportFilenameBase(args: {
   date: string;
+  dateEnd?: string | null;
+  stationLabel?: string | null;
+  operatorLabel?: string | null;
   shiftName?: string | null;
   operatorName?: string | null;
 }): string {
@@ -438,6 +456,18 @@ function buildExportFilenameBase(args: {
   const safeDate = sanitize(args.date, 10) || "Unknown_Date";
   parts.push(safeDate);
 
+  if (args.dateEnd && args.dateEnd !== args.date) {
+    const safeEnd = sanitize(args.dateEnd, 10);
+    if (safeEnd) parts.push("to", safeEnd);
+  }
+  if (args.stationLabel) {
+    const safeStation = sanitize(args.stationLabel, 24);
+    if (safeStation) parts.push(safeStation);
+  }
+  if (args.operatorLabel) {
+    const safeOperator = sanitize(args.operatorLabel, 24);
+    if (safeOperator) parts.push(safeOperator);
+  }
   if (args.shiftName) {
     const safeShift = sanitize(args.shiftName, 20);
     if (safeShift) parts.push(safeShift);
@@ -668,6 +698,7 @@ const DashboardScreen = ({ navigation }: any) => {
     useState(1);
   const [petFinalPackingTotalPages, setPetFinalPackingTotalPages] = useState(1);
   const [petFinalPackingTotalLogs, setPetFinalPackingTotalLogs] = useState(0);
+  // Pellet Packing (PLT) reuses the Final Packing list state (packingLogs / packing* filters).
 
   // Crusher logs list state
   const [crusherLogs, setCrusherLogs] = useState<any[]>([]);
@@ -776,6 +807,7 @@ const DashboardScreen = ({ navigation }: any) => {
       crusher: { outputs: number; weight: string };
       washing: { outputs: number; weight: string };
       extrusion: { outputs: number; weight: string };
+      pellet_packing?: { outputs: number; weight: string };
     };
   } | null>(null);
   const [closedByProductsLoading, setClosedByProductsLoading] = useState(false);
@@ -793,6 +825,8 @@ const DashboardScreen = ({ navigation }: any) => {
   const [shiftLogsPageExtrusion, setShiftLogsPageExtrusion] = useState(1);
   const [shiftLogsPageLabel, setShiftLogsPageLabel] = useState(1);
   const [shiftLogsPagePacking, setShiftLogsPagePacking] = useState(1);
+  const [shiftLogsPagePelletPacking, setShiftLogsPagePelletPacking] =
+    useState(1);
   const SHIFT_LOGS_PAGE_SIZE = 10;
 
   // PPIC: list and open saved end-shift reports
@@ -832,6 +866,20 @@ const DashboardScreen = ({ navigation }: any) => {
   >(null);
   const [ppicMaterialOptions, setPpicMaterialOptions] = useState<string[]>([]);
   const [ppicExportingExcel, setPpicExportingExcel] = useState(false);
+  // PPIC Export Report panel: operator + station + date-range filters
+  const [ppicOperators, setPpicOperators] = useState<
+    { id: number; name: string; material_type?: string }[]
+  >([]);
+  const [ppicExportOperatorId, setPpicExportOperatorId] =
+    useState<string>("all");
+  const [ppicExportStationCode, setPpicExportStationCode] =
+    useState<string>("all");
+  const [ppicExportDateStart, setPpicExportDateStart] = useState(() =>
+    formatDateLocal(new Date()),
+  );
+  const [ppicExportDateEnd, setPpicExportDateEnd] = useState(() =>
+    formatDateLocal(new Date()),
+  );
 
   // Saved by-products on start shift page (editable after save)
   const [savedByProductsOnStartPage, setSavedByProductsOnStartPage] = useState<
@@ -849,6 +897,7 @@ const DashboardScreen = ({ navigation }: any) => {
       crusher: { outputs: number; weight: string };
       washing: { outputs: number; weight: string };
       extrusion: { outputs: number; weight: string };
+      pellet_packing?: { outputs: number; weight: string };
     };
   } | null>(null);
   const [endShiftRemark, setEndShiftRemark] = useState("");
@@ -955,6 +1004,29 @@ const DashboardScreen = ({ navigation }: any) => {
     return out;
   };
 
+  /** Pellet Packing: merge pending Final Packaging (PKG) + pending Extrusion (EXT) bags; dedupe by output QR. */
+  const mergePelletPackingInputRows = (
+    pkgRows: any[],
+    extRows: any[],
+  ): any[] => {
+    const seen = new Set<string>();
+    const out: any[] = [];
+    const push = (
+      rows: any[] | undefined,
+      upstream: "Final Packing" | "Extrusion",
+    ) => {
+      for (const b of rows || []) {
+        const qr = String(b?.output_bag_qr ?? b?.outputBagQr ?? "").trim();
+        if (!qr || seen.has(qr)) continue;
+        seen.add(qr);
+        out.push({ ...b, pet_upstream_source: upstream });
+      }
+    };
+    push(pkgRows, "Final Packing");
+    push(extRows, "Extrusion");
+    return out;
+  };
+
   // Initial Load
   useEffect(() => {
     (async () => {
@@ -1004,6 +1076,23 @@ const DashboardScreen = ({ navigation }: any) => {
       } catch (e) {
         setPpicShifts([]);
         setPpicMaterialOptions([]);
+      }
+    })();
+  }, [user?.role]);
+
+  // PPIC: load production operators (for the Export Report operator filter)
+  useEffect(() => {
+    if (user?.role?.toLowerCase() !== "ppic") return;
+    (async () => {
+      try {
+        const res = await productionApi.getProductionOperators();
+        if (res.data?.success && Array.isArray(res.data.data)) {
+          setPpicOperators(res.data.data);
+        } else {
+          setPpicOperators([]);
+        }
+      } catch {
+        setPpicOperators([]);
       }
     })();
   }, [user?.role]);
@@ -1059,18 +1148,35 @@ const DashboardScreen = ({ navigation }: any) => {
    */
   const exportTransactionsExcel = async (opts?: {
     date?: string;
+    dateStart?: string;
+    dateEnd?: string;
     shiftName?: string;
+    stationCode?: string;
+    stationLabel?: string;
+    operatorId?: string;
+    operatorLabel?: string;
   }) => {
     if (!user) return;
     setPpicExportingExcel(true);
     try {
-      const exportDate =
-        opts?.date ?? new Date().toISOString().slice(0, 10);
+      const today = new Date().toISOString().slice(0, 10);
+      const exportStart = opts?.dateStart ?? opts?.date ?? today;
+      const exportEnd = opts?.dateEnd ?? opts?.date ?? exportStart;
       const shiftName = opts?.shiftName;
+      const stationCode =
+        opts?.stationCode && opts.stationCode !== "all"
+          ? opts.stationCode
+          : undefined;
+      const operatorId =
+        opts?.operatorId && opts.operatorId !== "all"
+          ? opts.operatorId
+          : undefined;
       const res = await productionApi.getLogsAll({
-        date_start: exportDate,
-        date_end: exportDate,
+        date_start: exportStart,
+        date_end: exportEnd,
         ...(shiftName ? { shift_type: shiftName } : {}),
+        ...(stationCode ? { station_code: stationCode } : {}),
+        ...(operatorId ? { operator_id: operatorId } : {}),
         limit: 25000,
       });
       const payload = res.data as
@@ -1102,7 +1208,10 @@ const DashboardScreen = ({ navigation }: any) => {
       const { format } = await shareProductionLogsAsXlsx(
         grouped,
         buildExportFilenameBase({
-          date: exportDate,
+          date: exportStart,
+          dateEnd: exportEnd,
+          stationLabel: opts?.stationLabel ?? null,
+          operatorLabel: opts?.operatorLabel ?? null,
           shiftName,
           operatorName: user?.name ?? null,
         }),
@@ -1137,6 +1246,38 @@ const DashboardScreen = ({ navigation }: any) => {
           ? undefined
           : ppicShifts.find((s) => s.id === ppicOverviewShiftId)?.name,
     });
+
+  /** PPIC Export Report panel: export by selected station + date range. */
+  const exportPpicByFilters = () => {
+    if (ppicExportDateStart > ppicExportDateEnd) {
+      Alert.alert(
+        t("common.error"),
+        "Start date must be on or before the end date.",
+      );
+      return;
+    }
+    const stationLabel =
+      ppicExportStationCode === "all"
+        ? "All_Stations"
+        : ((stations.find(
+            (s) =>
+              String((s as any).code || "").toUpperCase() ===
+              ppicExportStationCode,
+          )?.name as string) ?? ppicExportStationCode);
+    const operatorLabel =
+      ppicExportOperatorId === "all"
+        ? undefined
+        : (ppicOperators.find((o) => String(o.id) === ppicExportOperatorId)
+            ?.name ?? ppicExportOperatorId);
+    exportTransactionsExcel({
+      dateStart: ppicExportDateStart,
+      dateEnd: ppicExportDateEnd,
+      stationCode: ppicExportStationCode,
+      stationLabel,
+      operatorId: ppicExportOperatorId,
+      operatorLabel,
+    });
+  };
 
   useFocusEffect(
     useCallback(() => {
@@ -1201,6 +1342,7 @@ const DashboardScreen = ({ navigation }: any) => {
       setShiftLogsPageExtrusion(1);
       setShiftLogsPageLabel(1);
       setShiftLogsPagePacking(1);
+      setShiftLogsPagePelletPacking(1);
       setClosedShiftLogsLoading(true);
       try {
         const logsRes = await productionApi.getShiftLogs(shiftId);
@@ -1507,6 +1649,7 @@ const DashboardScreen = ({ navigation }: any) => {
           "Re-Packaging": isPET ? "#7c3aed" : "#22c55e",
           "Extrusion & Packaging": isPET ? "#16a34a" : "#f97316",
           "Final Packaging": isPET ? "#7c3aed" : "#22c55e",
+          "Pellet Packing": "#0d9488",
         };
 
         // PE: show full line (Crusher, Washing, Extrusion, Final) — only hide PC-only Label Removal
@@ -2412,6 +2555,7 @@ const DashboardScreen = ({ navigation }: any) => {
       setShiftLogsPageExtrusion(1);
       setShiftLogsPageLabel(1);
       setShiftLogsPagePacking(1);
+      setShiftLogsPagePelletPacking(1);
       setClosedShiftLogsLoading(true);
       try {
         const logsRes = await productionApi.getShiftLogs(shiftId);
@@ -2566,10 +2710,12 @@ const DashboardScreen = ({ navigation }: any) => {
         } else if (isPET && isPetFinalPackingLine(selectedStation)) {
           setPetFinalPackingLogs((prev) => prev.map(applyPatch));
         } else if (
+          isPelletPackingStation(selectedStation) ||
           selectedStation?.id === 5 ||
           selectedStation?.name?.toLowerCase().includes("final") ||
           selectedStation?.name?.toLowerCase().includes("re-packaging")
         ) {
+          // Pellet Packing reuses the Final Packing list state (packingLogs)
           setPackingLogs((prev) => prev.map(applyPatch));
         }
       }
@@ -2960,6 +3106,7 @@ const DashboardScreen = ({ navigation }: any) => {
     }
   };
 
+
   const loadWashingLogs = async () => {
     // Load filtered entries when a sub-line is selected
     try {
@@ -3068,6 +3215,17 @@ const DashboardScreen = ({ navigation }: any) => {
   };
 
   useEffect(() => {
+    // Pellet Packing: keep the chosen input bag when moving Input → Output so the
+    // output log can carry input_bag_qr (PKG/EXT source); all other transitions clear as usual.
+    if (
+      isPelletPackingStation(selectedStation) &&
+      selectedSection === "output"
+    ) {
+      setBagSearchQuery("");
+      setSuggestedBags([]);
+      setShowSuggestions(false);
+      return;
+    }
     // Clear selected input bag when station or section changes
     setSelectedInputBag(null);
     setBagSearchQuery("");
@@ -3151,6 +3309,7 @@ const DashboardScreen = ({ navigation }: any) => {
   // Calculate final packing / Starlinger output totals from shiftLogs
   useEffect(() => {
     const isPackingStation =
+      isPelletPackingStation(selectedStation) ||
       selectedStation?.id === 5 ||
       selectedStation?.name?.toLowerCase().includes("final") ||
       (selectedStation?.name?.toLowerCase().includes("re-packaging") &&
@@ -3256,7 +3415,8 @@ const DashboardScreen = ({ navigation }: any) => {
         wash ||
         bore ||
         isPetStarlingerLine(s) ||
-        isPetFinalPackingLine(s)
+        isPetFinalPackingLine(s) ||
+        isPelletPackingStation(s)
       );
     });
     const orderRank = (s: Station) => {
@@ -3273,6 +3433,7 @@ const DashboardScreen = ({ navigation }: any) => {
       if (isExtrusionPackagingStation(s)) return 2;
       if (isPetStarlingerLine(s)) return 3;
       if (isPetFinalPackingLine(s)) return 4;
+      if (isPelletPackingStation(s)) return 5;
       return 99;
     };
     let sorted = [...filtered].sort(
@@ -3318,6 +3479,7 @@ const DashboardScreen = ({ navigation }: any) => {
           !n.includes("label"))
       )
         return 2;
+      if (isPelletPackingStation(s)) return 4;
       if (
         n.includes("final") ||
         n.includes("re-packaging") ||
@@ -3347,6 +3509,10 @@ const DashboardScreen = ({ navigation }: any) => {
       if (isPE) loadPeExtrusionLogs();
       else if (isPET) loadPetBoretechLogs();
       else loadExtrusionLogs();
+    }
+    // Pellet Packing (PLT): reuses Final Packing list state (loadPackingLogs filters by station id)
+    if (isPelletPackingStation(selectedStation)) {
+      loadPackingLogs();
     }
     // Load logs when in PET Starlinger vs Final Packing (separate list state per station)
     // Starlinger: skip list fetch while Input/Output form is open — Recent Entries hidden there
@@ -3420,6 +3586,20 @@ const DashboardScreen = ({ navigation }: any) => {
   const handleStationSelect = (station: Station) => {
     setCurrentViewBags(0);
     setCurrentViewWeight(0);
+
+    // Pellet Packing (PLT): no sub-line; show the same INPUT/OUTPUT modal as Final Packaging (PC/PE/PET)
+    if (isPelletPackingStation(station)) {
+      setSelectedSubLine(null);
+      if (isShiftEnded) {
+        // Shift ended — view-only, skip the INPUT/OUTPUT modal
+        setSelectedStation(station);
+        setSelectedSection(null);
+      } else {
+        setPendingStation(station);
+        setShowStationModal(true);
+      }
+      return;
+    }
 
     // PET: auto-set sub-line on station entry (no selection step needed for Crusher/Boretech/Starlinger)
     if (isPET) {
@@ -3600,6 +3780,7 @@ const DashboardScreen = ({ navigation }: any) => {
       let expectedStationName: string = "";
       let usePetBoretechMergedSearch = false;
       let usePetFinalPackingMergedSearch = false;
+      let usePelletPackingMergedSearch = false;
 
       // Betty crusher input: search for 3E/Rapid crusher bags
       const isBettyCrusherInput =
@@ -3667,6 +3848,13 @@ const DashboardScreen = ({ navigation }: any) => {
         statusFilter = "pending";
       } else if (
         selectedSection === "input" &&
+        isPelletPackingStation(selectedStation)
+      ) {
+        // Pellet Packing input: pending Final Packaging (PKG) or pending Extrusion (EXT) bags
+        usePelletPackingMergedSearch = true;
+        expectedStationName = "Final Packaging or Extrusion";
+      } else if (
+        selectedSection === "input" &&
         (selectedStation?.id === 5 ||
           selectedStation?.name?.toLowerCase().includes("final") ||
           selectedStation?.name?.toLowerCase().includes("re-packaging") ||
@@ -3696,6 +3884,66 @@ const DashboardScreen = ({ navigation }: any) => {
           expectedStationName = "washing";
         }
         statusFilter = "pending";
+      }
+
+      if (usePelletPackingMergedSearch && selectedStation) {
+        const pkgId = findStationIdByCode(stations, "PKG", "final");
+        const extId = findStationIdByCode(stations, "EXT", "extrusion");
+        const pltSid = selectedStation.id;
+        const [rPkg, rExt] = await Promise.all([
+          pkgId != null
+            ? productionApi.searchLogs(
+                qrCode,
+                pkgId,
+                pltSid,
+                "pending",
+                undefined,
+                undefined,
+                true,
+              )
+            : Promise.resolve({ data: { success: true, data: [] as any[] } }),
+          extId != null
+            ? productionApi.searchLogs(
+                qrCode,
+                extId,
+                pltSid,
+                "pending",
+                undefined,
+                undefined,
+                true,
+              )
+            : Promise.resolve({ data: { success: true, data: [] as any[] } }),
+        ]);
+        const merged = mergePelletPackingInputRows(
+          rPkg.data.success ? rPkg.data.data || [] : [],
+          rExt.data.success ? rExt.data.data || [] : [],
+        );
+        const normalized = normalizeSuggestedBags(merged);
+        const matchedBatch =
+          normalized.find((b) => getBagDisplayId(b) === qrCode) ||
+          normalized.find(
+            (b) => getBagDisplayId(b).toLowerCase() === qrCode.toLowerCase(),
+          );
+        if (matchedBatch) {
+          setSelectedInputBag({
+            output_bag_qr: matchedBatch.output_bag_qr,
+            weight: matchedBatch.weight || weight,
+            ...(matchedBatch.pet_upstream_source
+              ? { pet_upstream_source: matchedBatch.pet_upstream_source }
+              : {}),
+            ...(matchedBatch.sub_line
+              ? { sub_line: matchedBatch.sub_line }
+              : {}),
+          });
+          setShowScanner(false);
+        } else {
+          Alert.alert(
+            "Invalid Batch",
+            "This QR is not a valid Final Packaging (pending) or Extrusion (pending) bag.",
+          );
+          setScanned(false);
+        }
+        return;
       }
 
       if (usePetFinalPackingMergedSearch && selectedStation) {
@@ -3897,7 +4145,10 @@ const DashboardScreen = ({ navigation }: any) => {
 
       // For PE: translate the output type / sub-line to a short QR code
       let qrSubLine: string | undefined = selectedSubLine || undefined;
-      if (isPE) {
+      if (isPelletPackingStation(selectedStation)) {
+        // Pellet Packing has no sub-line — QR comes from the station code (…-PLT-001)
+        qrSubLine = undefined;
+      } else if (isPE) {
         const isExtStn = selectedStation.name
           ?.toLowerCase()
           .includes("extrusion");
@@ -3985,9 +4236,11 @@ const DashboardScreen = ({ navigation }: any) => {
         const isRepackagingStation = selectedStation.name
           ?.toLowerCase()
           .includes("re-packaging");
-        const initialBagStatus = isRepackagingStation
-          ? ("Completed" as const)
-          : ("pending" as const);
+        // Pellet Packing outputs are final — server defaults PLT logs to Completed
+        const initialBagStatus =
+          isRepackagingStation || isPelletPackingStation(selectedStation)
+            ? ("Completed" as const)
+            : ("pending" as const);
         setPreviewData({
           qrCode: String(qrCode).trim(),
           weight: String(weightNum),
@@ -4079,6 +4332,24 @@ const DashboardScreen = ({ navigation }: any) => {
           }
         }
 
+        // Pellet Packing: an Extrusion input was 'pending' — mark it Completed so it leaves
+        // the pending pool. Final Packing inputs need no update (server excludes consumed bags
+        // via PLT rows whose input_bag_qr matches).
+        if (
+          isPelletPackingStation(selectedStation) &&
+          selectedInputBag?.output_bag_qr &&
+          (selectedInputBag as any).pet_upstream_source === "Extrusion"
+        ) {
+          try {
+            await productionApi.updateLogStatus(
+              selectedInputBag.output_bag_qr,
+              "Completed",
+            );
+          } catch (err) {
+            console.error("Error marking input bag as Completed:", err);
+          }
+        }
+
         // Reload shift logs to get updated data (especially for extrusion totals calculation)
         if (backendShiftId) {
           try {
@@ -4090,7 +4361,10 @@ const DashboardScreen = ({ navigation }: any) => {
             console.error("Error reloading shift logs:", error);
           }
         }
-        if (isPET && isPetFinalPackingLine(selectedStation)) {
+        if (isPelletPackingStation(selectedStation)) {
+          // Pellet Packing reuses the Final Packing list (packingLogs)
+          await loadPackingLogs();
+        } else if (isPET && isPetFinalPackingLine(selectedStation)) {
           await loadPetFinalPackingLogs();
         } else if (
           selectedStation?.id === 5 ||
@@ -4104,6 +4378,7 @@ const DashboardScreen = ({ navigation }: any) => {
         // Crusher, Washing, Final Packing / PET post-Boretech, and Extrusion use useEffect to auto-recalculate from shiftLogs
         if (
           !isExtrusionPackagingStation(selectedStation) &&
+          !isPelletPackingStation(selectedStation) &&
           !selectedStation?.name?.toLowerCase().includes("crusher") &&
           !selectedStation?.name?.toLowerCase().includes("washing") &&
           !selectedStation?.name?.toLowerCase().includes("final") &&
@@ -4143,6 +4418,15 @@ const DashboardScreen = ({ navigation }: any) => {
   const handleBack = () => {
     if (showShiftClosedView) {
       handleBackToShifts();
+      return;
+    }
+
+    // ── Pellet Packing (PLT) back navigation (PC/PE/PET) ────────────────────
+    if (isPelletPackingStation(selectedStation)) {
+      // Modal-entered (like Final Packaging): back from Input/Output returns to the station list
+      setSelectedStation(null);
+      setSelectedSubLine(null);
+      setSelectedSection(null);
       return;
     }
 
@@ -4354,6 +4638,56 @@ const DashboardScreen = ({ navigation }: any) => {
           setSuggestedBags([]);
           setShowSuggestions(false);
         }
+        return;
+      }
+
+      // Pellet Packing input: pending Final Packaging (PKG) + pending Extrusion (EXT) bags
+      // (empty query = list up to limit each, like PET Boretech / Final Packing)
+      if (
+        isPelletPackingStation(selectedStation) &&
+        selectedSection === "input"
+      ) {
+        const q =
+          text && String(text).trim().length > 0 ? String(text).trim() : "";
+        const pkgId = findStationIdByCode(stations, "PKG", "final");
+        const extId = findStationIdByCode(stations, "EXT", "extrusion");
+        const pltSid = selectedStation!.id;
+        const [rPkg, rExt] = await Promise.all([
+          pkgId != null
+            ? productionApi.searchLogs(
+                q,
+                pkgId,
+                pltSid,
+                "pending",
+                undefined,
+                undefined,
+                true,
+              )
+            : Promise.resolve({ data: { success: true, data: [] as any[] } }),
+          extId != null
+            ? productionApi.searchLogs(
+                q,
+                extId,
+                pltSid,
+                "pending",
+                undefined,
+                undefined,
+                true,
+              )
+            : Promise.resolve({ data: { success: true, data: [] as any[] } }),
+        ]);
+        const merged = mergePelletPackingInputRows(
+          rPkg.data.success ? rPkg.data.data || [] : [],
+          rExt.data.success ? rExt.data.data || [] : [],
+        );
+        const list = normalizeSuggestedBags(merged);
+        setSuggestedBags(list);
+        setShowSuggestions(list.length > 0);
+        return;
+      }
+      if (isPelletPackingStation(selectedStation)) {
+        setSuggestedBags([]);
+        setShowSuggestions(false);
         return;
       }
 
@@ -4651,6 +4985,18 @@ const DashboardScreen = ({ navigation }: any) => {
       }
       return;
     }
+    // Pellet Packing input: load merged PKG (Completed) + EXT (pending) bags on focus (including empty search)
+    if (
+      selectedSection === "input" &&
+      isPelletPackingStation(selectedStation)
+    ) {
+      try {
+        await onBagSearch(bagSearchQuery ?? "");
+      } catch {
+        setShowSuggestions(suggestedBags.length > 0);
+      }
+      return;
+    }
     setShowSuggestions(suggestedBags.length > 0);
   };
 
@@ -4666,6 +5012,8 @@ const DashboardScreen = ({ navigation }: any) => {
       case "Extrusion":
         return <Zap {...props} />;
       case "Re-Packaging":
+        return <Box {...props} />;
+      case "Pellet Packing":
         return <Box {...props} />;
       default:
         return <Package {...props} />;
@@ -4910,6 +5258,9 @@ const DashboardScreen = ({ navigation }: any) => {
                       name.includes("extrusion")
                     )
                       return "extrusion";
+                    // Pellet Packing (PLT) before the generic "packing" check — name contains "packing"
+                    if (code === "PLT" || name.includes("pellet"))
+                      return "pellet_packing";
                     if (
                       code === "PKG" ||
                       name.includes("re-packaging") ||
@@ -4987,6 +5338,14 @@ const DashboardScreen = ({ navigation }: any) => {
                       setPage: setShiftLogsPagePacking,
                     },
                     {
+                      key: "pellet_packing",
+                      label: "Pellet Packing",
+                      color: "#F0FDFA",
+                      accent: "#0D9488",
+                      page: shiftLogsPagePelletPacking,
+                      setPage: setShiftLogsPagePelletPacking,
+                    },
+                    {
                       key: "other",
                       label: "Other",
                       color: "#F8FAFC",
@@ -5024,6 +5383,7 @@ const DashboardScreen = ({ navigation }: any) => {
                             setShiftLogsPageExtrusion(1);
                             setShiftLogsPageLabel(1);
                             setShiftLogsPagePacking(1);
+                            setShiftLogsPagePelletPacking(1);
                           }}
                           returnKeyType="search"
                         />
@@ -6035,6 +6395,175 @@ const DashboardScreen = ({ navigation }: any) => {
                   </View>
                 )}
 
+                {/* ── Export Report (station + date range) ── */}
+                <View style={[styles.ppicHomeCard, { marginTop: 24 }]}>
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      marginBottom: 4,
+                    }}
+                  >
+                    <Download color="#0ea5e9" size={16} />
+                    <Text
+                      style={[
+                        styles.ppicHomeLabel,
+                        { marginLeft: 6, marginBottom: 0 },
+                      ]}
+                    >
+                      Export Report
+                    </Text>
+                  </View>
+
+                  <Text style={[styles.ppicHomeLabel, { marginTop: 12 }]}>
+                    Operator
+                  </Text>
+                  <View style={styles.ppicShiftRow}>
+                    <TouchableOpacity
+                      style={[
+                        styles.ppicShiftBtn,
+                        ppicExportOperatorId === "all" &&
+                          styles.ppicShiftBtnActive,
+                      ]}
+                      onPress={() => setPpicExportOperatorId("all")}
+                    >
+                      <Text
+                        style={[
+                          styles.ppicShiftBtnText,
+                          ppicExportOperatorId === "all" &&
+                            styles.ppicShiftBtnTextActive,
+                        ]}
+                      >
+                        {t("dashboard.all")}
+                      </Text>
+                    </TouchableOpacity>
+                    {ppicOperators.map((op) => {
+                      const active = ppicExportOperatorId === String(op.id);
+                      return (
+                        <TouchableOpacity
+                          key={`ppic-exp-op-${op.id}`}
+                          style={[
+                            styles.ppicShiftBtn,
+                            active && styles.ppicShiftBtnActive,
+                          ]}
+                          onPress={() =>
+                            setPpicExportOperatorId(String(op.id))
+                          }
+                        >
+                          <Text
+                            style={[
+                              styles.ppicShiftBtnText,
+                              active && styles.ppicShiftBtnTextActive,
+                            ]}
+                          >
+                            {op.name}
+                            {op.material_type ? ` (${op.material_type})` : ""}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+
+                  <Text style={[styles.ppicHomeLabel, { marginTop: 12 }]}>
+                    Station
+                  </Text>
+                  <View style={styles.ppicShiftRow}>
+                    <TouchableOpacity
+                      style={[
+                        styles.ppicShiftBtn,
+                        ppicExportStationCode === "all" &&
+                          styles.ppicShiftBtnActive,
+                      ]}
+                      onPress={() => setPpicExportStationCode("all")}
+                    >
+                      <Text
+                        style={[
+                          styles.ppicShiftBtnText,
+                          ppicExportStationCode === "all" &&
+                            styles.ppicShiftBtnTextActive,
+                        ]}
+                      >
+                        {t("dashboard.all")}
+                      </Text>
+                    </TouchableOpacity>
+                    {stations.map((s) => {
+                      const code = String((s as any).code || "").toUpperCase();
+                      if (!code) return null;
+                      const active = ppicExportStationCode === code;
+                      return (
+                        <TouchableOpacity
+                          key={`ppic-exp-st-${code}`}
+                          style={[
+                            styles.ppicShiftBtn,
+                            active && styles.ppicShiftBtnActive,
+                          ]}
+                          onPress={() => setPpicExportStationCode(code)}
+                        >
+                          <Text
+                            style={[
+                              styles.ppicShiftBtnText,
+                              active && styles.ppicShiftBtnTextActive,
+                            ]}
+                          >
+                            {(s as any).displayName || s.name}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+
+                  <Text style={[styles.ppicHomeLabel, { marginTop: 12 }]}>
+                    From
+                  </Text>
+                  <StationDatePicker
+                    value={parseDateLocal(ppicExportDateStart)}
+                    onChange={(date) =>
+                      setPpicExportDateStart(formatDateLocal(date))
+                    }
+                    maximumDate={maxDate}
+                  />
+                  <Text style={[styles.ppicHomeLabel, { marginTop: 12 }]}>
+                    To
+                  </Text>
+                  <StationDatePicker
+                    value={parseDateLocal(ppicExportDateEnd)}
+                    onChange={(date) =>
+                      setPpicExportDateEnd(formatDateLocal(date))
+                    }
+                    maximumDate={maxDate}
+                  />
+
+                  <TouchableOpacity
+                    onPress={exportPpicByFilters}
+                    disabled={ppicExportingExcel}
+                    style={{
+                      marginTop: 16,
+                      backgroundColor: ppicExportingExcel
+                        ? "#cbd5e1"
+                        : "#0ea5e9",
+                      borderRadius: 10,
+                      paddingVertical: 12,
+                      flexDirection: "row",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 8,
+                    }}
+                  >
+                    <Download color="#fff" size={18} />
+                    <Text
+                      style={{
+                        color: "#fff",
+                        fontWeight: "700",
+                        fontSize: 14,
+                      }}
+                    >
+                      {ppicExportingExcel
+                        ? t("dashboard.ppicExportExcelExporting")
+                        : t("dashboard.ppicExportExcel")}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
                 {/* ── Station Overview ── */}
                 <View style={[styles.ppicSectionHeader, { marginTop: 24 }]}>
                   <Package color="#475569" size={14} />
@@ -6185,6 +6714,8 @@ const DashboardScreen = ({ navigation }: any) => {
                       const sname = (station.station_name || "").toLowerCase();
                       const colorKey = sname.includes("label")
                         ? "label"
+                        : sname.includes("pellet")
+                          ? "packing"
                         : sname.includes("boretech")
                           ? "extrusion"
                           : sname.includes("starlinger")
@@ -17902,9 +18433,11 @@ const DashboardScreen = ({ navigation }: any) => {
                       {selectedSection === "input" ? (
                         <View>
                           <Text style={styles.formTitle}>
-                            {isPET
-                              ? "Input — Scan Crusher Rapid PET Bag"
-                              : "Input Material"}
+                            {isPelletPackingStation(selectedStation)
+                              ? "Input — Scan Final Packing or Extrusion Bag"
+                              : isPET
+                                ? "Input — Scan Crusher Rapid PET Bag"
+                                : "Input Material"}
                           </Text>
                           <View style={styles.searchContainer}>
                             <View style={styles.searchInputWrapper}>
