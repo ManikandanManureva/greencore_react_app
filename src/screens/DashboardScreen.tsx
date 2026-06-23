@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useFocusEffect } from "@react-navigation/native";
 import {
   StyleSheet,
@@ -715,6 +715,17 @@ const DashboardScreen = ({ navigation }: any) => {
   const [selectedLogForPrint, setSelectedLogForPrint] = useState<any>(null);
   const [editingLogWeight, setEditingLogWeight] = useState<any>(null);
 
+  // Crusher DN No. (Delivery Note) — set once, persists to all crusher outputs until updated
+  const [crusherDnNo, setCrusherDnNo] = useState<string>("");
+  const [crusherDnNoInput, setCrusherDnNoInput] = useState<string>("");
+  const [scanningForDnNo, setScanningForDnNo] = useState(false);
+  const [crusherDnId, setCrusherDnId] = useState<number | null>(null);
+  const [crusherDnNetWeight, setCrusherDnNetWeight] = useState<number | null>(null);
+  const [dnSearchQuery, setDnSearchQuery] = useState<string>("");
+  const [dnSearchResults, setDnSearchResults] = useState<{ id: number; deliveryNote: string; netWeight: number }[]>([]);
+  const [dnSearchLoading, setDnSearchLoading] = useState(false);
+  const [dnDropdownVisible, setDnDropdownVisible] = useState(false);
+
   // PE Hold flow state ───────────────────────────────────────────────────────
   /** Hold creation modal — PE captures weight + remark for material set aside for QC reprocess */
   const [peHoldModalVisible, setPeHoldModalVisible] = useState(false);
@@ -914,6 +925,7 @@ const DashboardScreen = ({ navigation }: any) => {
     "pending" | "Completed"
   >("pending");
   const previewBagStatusRef = React.useRef<"pending" | "Completed">("pending");
+  const dnSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Ref is set directly in status toggle and preview open/close handlers. Do NOT sync ref from state
   // here — a re-render with stale state can overwrite the ref to 'pending' after user chose 'Completed'.
   const [isPrinting, setIsPrinting] = useState(false);
@@ -1035,6 +1047,17 @@ const DashboardScreen = ({ navigation }: any) => {
 
       const savedPrinter = await printService.getSavedPrinter();
       if (savedPrinter) setSelectedPrinter(savedPrinter);
+
+      const savedDnNo = await AsyncStorage.getItem("crusher_dn_no");
+      if (savedDnNo) {
+        setCrusherDnNo(savedDnNo);
+        setCrusherDnNoInput(savedDnNo);
+        setDnSearchQuery(savedDnNo);
+      }
+      const savedDnId = await AsyncStorage.getItem("crusher_dn_id");
+      if (savedDnId) setCrusherDnId(Number(savedDnId));
+      const savedDnNetWeight = await AsyncStorage.getItem("crusher_dn_net_weight");
+      if (savedDnNetWeight) setCrusherDnNetWeight(Number(savedDnNetWeight));
     })();
   }, []);
 
@@ -3773,6 +3796,17 @@ const DashboardScreen = ({ navigation }: any) => {
         return;
       }
 
+      // If scanning for crusher DN No., capture the scanned value directly
+      if (scanningForDnNo) {
+        setCrusherDnNo(qrCode);
+        setCrusherDnNoInput(qrCode);
+        await AsyncStorage.setItem("crusher_dn_no", qrCode);
+        setScanningForDnNo(false);
+        setShowScanner(false);
+        setScanned(false);
+        return;
+      }
+
       // Validate the scanned QR code matches the expected batch type (same flow as search)
       // Washing input: Crusher batches only. Extrusion input: Washing batches only.
       let targetStationId: number | undefined;
@@ -4127,6 +4161,201 @@ const DashboardScreen = ({ navigation }: any) => {
   const handleWeightInputChange = (text: string) =>
     setWeightInput(filterNumericWeight(text));
 
+  const clearCrusherDn = () => {
+    setCrusherDnNo("");
+    setCrusherDnNoInput("");
+    setCrusherDnId(null);
+    setCrusherDnNetWeight(null);
+    setDnSearchQuery("");
+    setDnDropdownVisible(false);
+    setDnSearchResults([]);
+    AsyncStorage.removeItem("crusher_dn_no");
+    AsyncStorage.removeItem("crusher_dn_id");
+    AsyncStorage.removeItem("crusher_dn_net_weight");
+  };
+
+  const searchDeliveryNotes = async (query: string) => {
+    setDnSearchLoading(true);
+    try {
+      const res = await productionApi.getDeliveryNotes(query);
+      if (res.data?.success) {
+        setDnSearchResults(res.data.data || []);
+        setDnDropdownVisible(true);
+      }
+    } catch {
+      setDnSearchResults([]);
+    } finally {
+      setDnSearchLoading(false);
+    }
+  };
+
+  const handleDnSearchChange = (text: string) => {
+    setDnSearchQuery(text);
+    setDnDropdownVisible(false);
+    if (dnSearchTimerRef.current) clearTimeout(dnSearchTimerRef.current);
+    if (text.trim().length > 0) {
+      dnSearchTimerRef.current = setTimeout(() => {
+        searchDeliveryNotes(text.trim());
+      }, 400);
+    } else {
+      setDnSearchResults([]);
+    }
+  };
+
+  const selectDn = async (item: { id: number; deliveryNote: string; netWeight: number }) => {
+    setCrusherDnNo(item.deliveryNote);
+    setCrusherDnNoInput(item.deliveryNote);
+    setCrusherDnId(item.id);
+    setCrusherDnNetWeight(item.netWeight);
+    setDnSearchQuery(item.deliveryNote);
+    setDnDropdownVisible(false);
+    setDnSearchResults([]);
+    await AsyncStorage.setItem("crusher_dn_no", item.deliveryNote);
+    await AsyncStorage.setItem("crusher_dn_id", String(item.id));
+    await AsyncStorage.setItem("crusher_dn_net_weight", String(item.netWeight));
+    try {
+      await productionApi.markDeliveryNoteCompleted(item.id);
+    } catch (e) {
+      console.error("Failed to mark DN as completed", e);
+    }
+  };
+
+  /** Crusher DN No. card — searchable dropdown from raw_material.deliveryNote (PET only). */
+  const renderCrusherDnNoSection = () => (
+    <View style={styles.sectionCard}>
+      <View style={styles.sectionHeaderRow}>
+        <View style={[styles.typePill, { backgroundColor: "#E0F2FE" }]}>
+          <Text style={[styles.typePillText, { color: "#0369A1" }]}>INPUT</Text>
+        </View>
+        <Text style={styles.sectionTitleText}>Delivery Note (DN No.)</Text>
+      </View>
+
+      {/* Active DN badge */}
+      {crusherDnNo ? (
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            backgroundColor: "#D1FAE5",
+            borderRadius: 8,
+            paddingHorizontal: 12,
+            paddingVertical: 10,
+            marginBottom: 12,
+            borderWidth: 1,
+            borderColor: "#6EE7B7",
+          }}
+        >
+          <View style={{ flex: 1 }}>
+            <Text style={{ fontSize: 11, color: "#065F46", fontWeight: "600", marginBottom: 2 }}>
+              Active DN No.
+            </Text>
+            <Text style={{ fontSize: 16, color: "#065F46", fontWeight: "700" }}>
+              {crusherDnNo}
+            </Text>
+            {crusherDnNetWeight != null && (
+              <Text style={{ fontSize: 12, color: "#047857", marginTop: 3 }}>
+                Net Weight: {crusherDnNetWeight.toLocaleString()} kg
+              </Text>
+            )}
+          </View>
+          <TouchableOpacity onPress={clearCrusherDn} style={{ padding: 4 }}>
+            <X size={18} color="#EF4444" />
+          </TouchableOpacity>
+        </View>
+      ) : (
+        <View
+          style={{
+            backgroundColor: "#FEF3C7",
+            borderRadius: 8,
+            paddingHorizontal: 12,
+            paddingVertical: 8,
+            marginBottom: 10,
+            borderWidth: 1,
+            borderColor: "#FDE047",
+          }}
+        >
+          <Text style={{ fontSize: 12, color: "#92400E", fontWeight: "600" }}>
+            No DN No. selected — search below
+          </Text>
+        </View>
+      )}
+
+      {/* Search input */}
+      <View style={styles.searchContainer}>
+        <View style={styles.searchInputWrapper}>
+          <Search size={16} color="#94A3B8" style={{ marginRight: 6 }} />
+          <TextInput
+            style={[styles.searchInput, { flex: 1 }]}
+            placeholder="Search Delivery Note..."
+            placeholderTextColor="#94A3B8"
+            value={dnSearchQuery}
+            onChangeText={handleDnSearchChange}
+            returnKeyType="search"
+            autoCapitalize="none"
+          />
+          {dnSearchLoading && <ActivityIndicator size="small" color="#0369a1" style={{ marginLeft: 6 }} />}
+          {dnSearchQuery.length > 0 && !dnSearchLoading && (
+            <TouchableOpacity
+              onPress={() => { setDnSearchQuery(""); setDnSearchResults([]); setDnDropdownVisible(false); }}
+              style={{ padding: 2 }}
+            >
+              <X size={14} color="#94A3B8" />
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
+
+      {/* Dropdown results */}
+      {dnDropdownVisible && dnSearchResults.length > 0 && (
+        <View
+          style={{
+            borderWidth: 1,
+            borderColor: "#E2E8F0",
+            borderRadius: 8,
+            marginTop: 4,
+            backgroundColor: "#fff",
+            maxHeight: 220,
+            overflow: "hidden",
+          }}
+        >
+          <ScrollView keyboardShouldPersistTaps="handled" nestedScrollEnabled>
+            {dnSearchResults.map((item, idx) => (
+              <TouchableOpacity
+                key={item.id}
+                onPress={() => selectDn(item)}
+                style={{
+                  paddingHorizontal: 14,
+                  paddingVertical: 12,
+                  borderBottomWidth: idx < dnSearchResults.length - 1 ? 1 : 0,
+                  borderBottomColor: "#F1F5F9",
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                }}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 14, fontWeight: "600", color: "#1E293B" }}>
+                    {item.deliveryNote}
+                  </Text>
+                  <Text style={{ fontSize: 12, color: "#64748B", marginTop: 2 }}>
+                    Net Weight: {item.netWeight.toLocaleString()} kg
+                  </Text>
+                </View>
+                <ChevronRight size={16} color="#CBD5E1" />
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        </View>
+      )}
+
+      {dnDropdownVisible && dnSearchResults.length === 0 && !dnSearchLoading && (
+        <View style={{ paddingVertical: 12, alignItems: "center" }}>
+          <Text style={{ fontSize: 13, color: "#94A3B8" }}>No delivery notes found</Text>
+        </View>
+      )}
+    </View>
+  );
+
   const handleLogProduction = async () => {
     if (
       !isValidProductionWeightInput(weightInput) ||
@@ -4295,6 +4524,9 @@ const DashboardScreen = ({ navigation }: any) => {
         : isPET
           ? selectedSubLine // 'Rapid' / 'Flakes PET' / 'Pellet PET' — already set by handleStationSelect
           : selectedSubLine;
+      const isCrusherStn = selectedStation?.name
+        ?.toLowerCase()
+        .includes("crusher");
       const payload = {
         shiftId: backendShiftId,
         stationId: selectedStation.id,
@@ -4306,6 +4538,7 @@ const DashboardScreen = ({ navigation }: any) => {
         photoUrl: photoUrl,
         remark: remarkInput.trim() || undefined,
         shiftTypeId: selectedShift?.id,
+        ...(isCrusherStn && crusherDnNo ? { dnNo: crusherDnNo } : {}),
       };
       const response = await productionApi.logProduction(payload);
       if (response.data.success) {
@@ -8631,6 +8864,31 @@ const DashboardScreen = ({ navigation }: any) => {
                         <Text style={styles.selectionTitle}>Select Action</Text>
                         <TouchableOpacity
                           style={styles.selectionCard}
+                          onPress={() => {
+                            setSelectedSection("input");
+                            setCrusherDnNoInput(crusherDnNo);
+                          }}
+                        >
+                          <View
+                            style={[
+                              styles.selectionIconBox,
+                              { backgroundColor: "#0369a1" },
+                            ]}
+                          >
+                            <FileText color="#FFF" size={28} />
+                          </View>
+                          <View style={styles.selectionText}>
+                            <Text style={styles.selectionCardTitle}>Input</Text>
+                            <Text style={styles.selectionCardSub}>
+                              {crusherDnNo
+                                ? `DN: ${crusherDnNo}`
+                                : "Scan or enter Delivery Note No."}
+                            </Text>
+                          </View>
+                          <ChevronRight color="#CCC" size={24} />
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={styles.selectionCard}
                           onPress={() => setSelectedSection("output")}
                         >
                           <View
@@ -8677,6 +8935,39 @@ const DashboardScreen = ({ navigation }: any) => {
                             <ChevronRight color="#CCC" size={24} />
                           </TouchableOpacity>
                         )}
+                      </View>
+                    )}
+
+                    {/* PET Crusher: DN No. Input screen */}
+                    {selectedSection === "input" && (
+                      <View style={{ paddingHorizontal: 16, marginBottom: 12 }}>
+                        <View style={styles.sublineBadgeWrapper}>
+                          <View
+                            style={[
+                              styles.sublineBadge,
+                              {
+                                backgroundColor: "#E0F2FE",
+                                borderColor: "#bae6fd",
+                              },
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.sublineBadgeText,
+                                { color: "#0369a1" },
+                              ]}
+                            >
+                              Delivery Note Input
+                            </Text>
+                          </View>
+                        </View>
+                        {renderCrusherDnNoSection()}
+                        <TouchableOpacity
+                          style={[styles.secondaryButton, { marginTop: 8 }]}
+                          onPress={handleBack}
+                        >
+                          <Text style={styles.secondaryButtonText}>← Back</Text>
+                        </TouchableOpacity>
                       </View>
                     )}
 
@@ -8793,6 +9084,64 @@ const DashboardScreen = ({ navigation }: any) => {
                                 Crusher output bag
                               </Text>
                             </View>
+                            {crusherDnNo ? (
+                              <View
+                                style={{
+                                  flexDirection: "row",
+                                  alignItems: "center",
+                                  backgroundColor: "#D1FAE5",
+                                  borderRadius: 8,
+                                  paddingHorizontal: 12,
+                                  paddingVertical: 8,
+                                  marginBottom: 10,
+                                  borderWidth: 1,
+                                  borderColor: "#6EE7B7",
+                                }}
+                              >
+                                <View style={{ flex: 1 }}>
+                                  <Text
+                                    style={{
+                                      fontSize: 11,
+                                      color: "#065F46",
+                                      fontWeight: "600",
+                                    }}
+                                  >
+                                    Active DN No.
+                                  </Text>
+                                  <Text
+                                    style={{
+                                      fontSize: 15,
+                                      color: "#065F46",
+                                      fontWeight: "700",
+                                    }}
+                                  >
+                                    {crusherDnNo}
+                                  </Text>
+                                </View>
+                              </View>
+                            ) : (
+                              <View
+                                style={{
+                                  backgroundColor: "#FEF9C3",
+                                  borderRadius: 8,
+                                  paddingHorizontal: 12,
+                                  paddingVertical: 8,
+                                  marginBottom: 10,
+                                  borderWidth: 1,
+                                  borderColor: "#FDE047",
+                                }}
+                              >
+                                <Text
+                                  style={{
+                                    fontSize: 12,
+                                    color: "#92400E",
+                                    fontWeight: "600",
+                                  }}
+                                >
+                                  No DN No. set — tap INPUT to scan or enter
+                                </Text>
+                              </View>
+                            )}
                             <View style={styles.inputGroup}>
                               <Text style={styles.label}>Weight (kg)</Text>
                               <View style={styles.inputWithIcon}>

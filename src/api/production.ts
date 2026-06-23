@@ -50,7 +50,20 @@ export const productionApi = {
   },
   getNextQr: (stationId: number, shiftId: number, subLine?: string, shiftTypeId?: number) =>
     client.get('/production/next-qr', { params: { stationId, shiftId, subLine, shiftTypeId } }),
-  logProduction: (data: any) =>
+  logProduction: (data: {
+    shiftId: number;
+    stationId: number;
+    inputBagQr?: string | null;
+    outputBagQr?: string | null;
+    weight: number;
+    status: string;
+    subLine?: string;
+    photoUrl?: string | null;
+    remark?: string;
+    shiftTypeId?: number;
+    dnNo?: string;   // Crusher: Delivery Note number, maps to all outputs until updated
+    [key: string]: any;
+  }) =>
     client.post('/production/log', data),
   logByProducts: (shiftId: number, byProducts: any[]) =>
     client.post('/production/by-products', { shiftId, byProducts }),
@@ -130,6 +143,14 @@ export const productionApi = {
   },
   /** Distinct production operators (users with recorded logs) — for PPIC export filter. */
   getProductionOperators: () => client.get('/production/operators'),
+  /** Search deliveryNote + netWeight from raw_material (PET crusher DN input). */
+  getDeliveryNotes: (search?: string) =>
+    client.get('/production/delivery-notes', {
+      params: { ...(search ? { search } : {}) },
+    }),
+  /** Mark a raw_material row as completed (DN No. consumed by crusher). */
+  markDeliveryNoteCompleted: (id: number) =>
+    client.put(`/production/delivery-notes/${id}/complete`),
   updateLogStatus: (outputBagQr: string, status: string, washingLine?: string, extrusionLine?: string, usedLine?: string) => {
     const body: any = { outputBagQr, status };
     if (usedLine) {
