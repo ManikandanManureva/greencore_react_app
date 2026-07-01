@@ -61,6 +61,9 @@ export const inventoryApi = {
     operator?: string;
     createdBy?: string;
     date?: string;
+    date_start?: string;
+    date_end?: string;
+    materialType?: string;
     page?: number;
     limit?: number;
   }) => client.get('/inventory/raw-materials', { params }),

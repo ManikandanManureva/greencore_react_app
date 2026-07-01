@@ -46,10 +46,12 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { productionLineTitleKeyFromRole } from "../utils/productionLine";
 import { useAuth } from "../navigation/AuthContext";
 import { productionApi, masterDataApi } from "../api/production";
+import { inventoryApi } from "../api/inventory";
 import {
   shareProductionLogsAsXlsx,
   type LogsAllGrouped,
 } from "../utils/shareProductionLogsXlsx";
+import { shareIncomingMaterialAsXlsx } from "../utils/shareIncomingMaterialXlsx";
 import { Station, ProductionLog, Shift } from "../types";
 
 /**
@@ -891,6 +893,17 @@ const DashboardScreen = ({ navigation }: any) => {
   const [ppicExportDateEnd, setPpicExportDateEnd] = useState(() =>
     formatDateLocal(new Date()),
   );
+  // Export Report tab: 'production' | 'incoming'
+  const [ppicExportTab, setPpicExportTab] = useState<'production' | 'incoming'>('production');
+  // Incoming Material export filters
+  const [ppicIncomingMaterialType, setPpicIncomingMaterialType] = useState<string>('all');
+  const [ppicIncomingDateStart, setPpicIncomingDateStart] = useState(() =>
+    formatDateLocal(new Date()),
+  );
+  const [ppicIncomingDateEnd, setPpicIncomingDateEnd] = useState(() =>
+    formatDateLocal(new Date()),
+  );
+  const [ppicIncomingExportingExcel, setPpicIncomingExportingExcel] = useState(false);
 
   // Saved by-products on start shift page (editable after save)
   const [savedByProductsOnStartPage, setSavedByProductsOnStartPage] = useState<
@@ -1269,6 +1282,46 @@ const DashboardScreen = ({ navigation }: any) => {
           ? undefined
           : ppicShifts.find((s) => s.id === ppicOverviewShiftId)?.name,
     });
+
+  /** PPIC Export Report panel: export incoming material by date range + material type. */
+  const exportIncomingMaterialExcel = async () => {
+    if (ppicIncomingDateStart > ppicIncomingDateEnd) {
+      Alert.alert("Error", "Start date must be on or before the end date.");
+      return;
+    }
+    setPpicIncomingExportingExcel(true);
+    try {
+      const res = await inventoryApi.list({
+        date_start: ppicIncomingDateStart,
+        date_end: ppicIncomingDateEnd,
+        ...(ppicIncomingMaterialType !== 'all' ? { materialType: ppicIncomingMaterialType } : {}),
+        limit: 25000,
+      });
+      const payload = res.data as { success?: boolean; data?: any[]; total?: number } | undefined;
+      if (!payload?.success || !Array.isArray(payload.data)) {
+        Alert.alert("Error", "Failed to fetch incoming material data.");
+        return;
+      }
+      if (payload.data.length === 0) {
+        Alert.alert("Error", "No data found for the selected filters.");
+        return;
+      }
+      const matLabel = ppicIncomingMaterialType !== 'all' ? ppicIncomingMaterialType : 'All';
+      const filenameBase = `Incoming_Material_${matLabel}_${ppicIncomingDateStart}_to_${ppicIncomingDateEnd}`;
+      const { format } = await shareIncomingMaterialAsXlsx(payload.data, filenameBase);
+      if (format === 'csv') {
+        Alert.alert("Success", "Exported as CSV (Excel not available on this device).");
+      }
+      if ((payload.total ?? 0) >= 25000) {
+        Alert.alert("Note", "Only the first 25,000 rows were exported.");
+      }
+    } catch (e: unknown) {
+      const detail = e instanceof Error ? e.message : String(e);
+      Alert.alert("Error", `Export failed.\n\n${detail}`);
+    } finally {
+      setPpicIncomingExportingExcel(false);
+    }
+  };
 
   /** PPIC Export Report panel: export by selected station + date range. */
   const exportPpicByFilters = () => {
@@ -6628,173 +6681,197 @@ const DashboardScreen = ({ navigation }: any) => {
                   </View>
                 )}
 
-                {/* ── Export Report (station + date range) ── */}
+                {/* ── Export Report (Production | Incoming Material) ── */}
                 <View style={[styles.ppicHomeCard, { marginTop: 24 }]}>
-                  <View
-                    style={{
-                      flexDirection: "row",
-                      alignItems: "center",
-                      marginBottom: 4,
-                    }}
-                  >
+                  {/* Header */}
+                  <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 12 }}>
                     <Download color="#0ea5e9" size={16} />
-                    <Text
-                      style={[
-                        styles.ppicHomeLabel,
-                        { marginLeft: 6, marginBottom: 0 },
-                      ]}
-                    >
+                    <Text style={[styles.ppicHomeLabel, { marginLeft: 6, marginBottom: 0 }]}>
                       Export Report
                     </Text>
                   </View>
 
-                  <Text style={[styles.ppicHomeLabel, { marginTop: 12 }]}>
-                    Operator
-                  </Text>
-                  <View style={styles.ppicShiftRow}>
+                  {/* Tab switcher */}
+                  <View style={{ flexDirection: "row", borderRadius: 10, overflow: "hidden", borderWidth: 1, borderColor: "#e2e8f0", marginBottom: 16 }}>
                     <TouchableOpacity
-                      style={[
-                        styles.ppicShiftBtn,
-                        ppicExportOperatorId === "all" &&
-                          styles.ppicShiftBtnActive,
-                      ]}
-                      onPress={() => setPpicExportOperatorId("all")}
-                    >
-                      <Text
-                        style={[
-                          styles.ppicShiftBtnText,
-                          ppicExportOperatorId === "all" &&
-                            styles.ppicShiftBtnTextActive,
-                        ]}
-                      >
-                        {t("dashboard.all")}
-                      </Text>
-                    </TouchableOpacity>
-                    {ppicOperators.map((op) => {
-                      const active = ppicExportOperatorId === String(op.id);
-                      return (
-                        <TouchableOpacity
-                          key={`ppic-exp-op-${op.id}`}
-                          style={[
-                            styles.ppicShiftBtn,
-                            active && styles.ppicShiftBtnActive,
-                          ]}
-                          onPress={() =>
-                            setPpicExportOperatorId(String(op.id))
-                          }
-                        >
-                          <Text
-                            style={[
-                              styles.ppicShiftBtnText,
-                              active && styles.ppicShiftBtnTextActive,
-                            ]}
-                          >
-                            {op.name}
-                            {op.material_type ? ` (${op.material_type})` : ""}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
-
-                  <Text style={[styles.ppicHomeLabel, { marginTop: 12 }]}>
-                    Station
-                  </Text>
-                  <View style={styles.ppicShiftRow}>
-                    <TouchableOpacity
-                      style={[
-                        styles.ppicShiftBtn,
-                        ppicExportStationCode === "all" &&
-                          styles.ppicShiftBtnActive,
-                      ]}
-                      onPress={() => setPpicExportStationCode("all")}
-                    >
-                      <Text
-                        style={[
-                          styles.ppicShiftBtnText,
-                          ppicExportStationCode === "all" &&
-                            styles.ppicShiftBtnTextActive,
-                        ]}
-                      >
-                        {t("dashboard.all")}
-                      </Text>
-                    </TouchableOpacity>
-                    {stations.map((s) => {
-                      const code = String((s as any).code || "").toUpperCase();
-                      if (!code) return null;
-                      const active = ppicExportStationCode === code;
-                      return (
-                        <TouchableOpacity
-                          key={`ppic-exp-st-${code}`}
-                          style={[
-                            styles.ppicShiftBtn,
-                            active && styles.ppicShiftBtnActive,
-                          ]}
-                          onPress={() => setPpicExportStationCode(code)}
-                        >
-                          <Text
-                            style={[
-                              styles.ppicShiftBtnText,
-                              active && styles.ppicShiftBtnTextActive,
-                            ]}
-                          >
-                            {(s as any).displayName || s.name}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
-
-                  <Text style={[styles.ppicHomeLabel, { marginTop: 12 }]}>
-                    From
-                  </Text>
-                  <StationDatePicker
-                    value={parseDateLocal(ppicExportDateStart)}
-                    onChange={(date) =>
-                      setPpicExportDateStart(formatDateLocal(date))
-                    }
-                    maximumDate={maxDate}
-                  />
-                  <Text style={[styles.ppicHomeLabel, { marginTop: 12 }]}>
-                    To
-                  </Text>
-                  <StationDatePicker
-                    value={parseDateLocal(ppicExportDateEnd)}
-                    onChange={(date) =>
-                      setPpicExportDateEnd(formatDateLocal(date))
-                    }
-                    maximumDate={maxDate}
-                  />
-
-                  <TouchableOpacity
-                    onPress={exportPpicByFilters}
-                    disabled={ppicExportingExcel}
-                    style={{
-                      marginTop: 16,
-                      backgroundColor: ppicExportingExcel
-                        ? "#cbd5e1"
-                        : "#0ea5e9",
-                      borderRadius: 10,
-                      paddingVertical: 12,
-                      flexDirection: "row",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      gap: 8,
-                    }}
-                  >
-                    <Download color="#fff" size={18} />
-                    <Text
                       style={{
-                        color: "#fff",
-                        fontWeight: "700",
-                        fontSize: 14,
+                        flex: 1,
+                        paddingVertical: 10,
+                        alignItems: "center",
+                        backgroundColor: ppicExportTab === "production" ? "#0ea5e9" : "#f8fafc",
                       }}
+                      onPress={() => setPpicExportTab("production")}
                     >
-                      {ppicExportingExcel
-                        ? t("dashboard.ppicExportExcelExporting")
-                        : t("dashboard.ppicExportExcel")}
-                    </Text>
-                  </TouchableOpacity>
+                      <Text style={{ fontWeight: "700", fontSize: 13, color: ppicExportTab === "production" ? "#fff" : "#64748b" }}>
+                        Production
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={{
+                        flex: 1,
+                        paddingVertical: 10,
+                        alignItems: "center",
+                        backgroundColor: ppicExportTab === "incoming" ? "#0ea5e9" : "#f8fafc",
+                        borderLeftWidth: 1,
+                        borderLeftColor: "#e2e8f0",
+                      }}
+                      onPress={() => setPpicExportTab("incoming")}
+                    >
+                      <Text style={{ fontWeight: "700", fontSize: 13, color: ppicExportTab === "incoming" ? "#fff" : "#64748b" }}>
+                        Incoming Material
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* ── Production tab ── */}
+                  {ppicExportTab === "production" && (
+                    <>
+                      <Text style={[styles.ppicHomeLabel, { marginTop: 0 }]}>Operator</Text>
+                      <View style={styles.ppicShiftRow}>
+                        <TouchableOpacity
+                          style={[styles.ppicShiftBtn, ppicExportOperatorId === "all" && styles.ppicShiftBtnActive]}
+                          onPress={() => setPpicExportOperatorId("all")}
+                        >
+                          <Text style={[styles.ppicShiftBtnText, ppicExportOperatorId === "all" && styles.ppicShiftBtnTextActive]}>
+                            {t("dashboard.all")}
+                          </Text>
+                        </TouchableOpacity>
+                        {ppicOperators.map((op) => {
+                          const active = ppicExportOperatorId === String(op.id);
+                          return (
+                            <TouchableOpacity
+                              key={`ppic-exp-op-${op.id}`}
+                              style={[styles.ppicShiftBtn, active && styles.ppicShiftBtnActive]}
+                              onPress={() => setPpicExportOperatorId(String(op.id))}
+                            >
+                              <Text style={[styles.ppicShiftBtnText, active && styles.ppicShiftBtnTextActive]}>
+                                {op.name}{op.material_type ? ` (${op.material_type})` : ""}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+
+                      <Text style={[styles.ppicHomeLabel, { marginTop: 12 }]}>Station</Text>
+                      <View style={styles.ppicShiftRow}>
+                        <TouchableOpacity
+                          style={[styles.ppicShiftBtn, ppicExportStationCode === "all" && styles.ppicShiftBtnActive]}
+                          onPress={() => setPpicExportStationCode("all")}
+                        >
+                          <Text style={[styles.ppicShiftBtnText, ppicExportStationCode === "all" && styles.ppicShiftBtnTextActive]}>
+                            {t("dashboard.all")}
+                          </Text>
+                        </TouchableOpacity>
+                        {stations.map((s) => {
+                          const code = String((s as any).code || "").toUpperCase();
+                          if (!code) return null;
+                          const active = ppicExportStationCode === code;
+                          return (
+                            <TouchableOpacity
+                              key={`ppic-exp-st-${code}`}
+                              style={[styles.ppicShiftBtn, active && styles.ppicShiftBtnActive]}
+                              onPress={() => setPpicExportStationCode(code)}
+                            >
+                              <Text style={[styles.ppicShiftBtnText, active && styles.ppicShiftBtnTextActive]}>
+                                {(s as any).displayName || s.name}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+
+                      <Text style={[styles.ppicHomeLabel, { marginTop: 12 }]}>From</Text>
+                      <StationDatePicker
+                        value={parseDateLocal(ppicExportDateStart)}
+                        onChange={(date) => setPpicExportDateStart(formatDateLocal(date))}
+                        maximumDate={maxDate}
+                      />
+                      <Text style={[styles.ppicHomeLabel, { marginTop: 12 }]}>To</Text>
+                      <StationDatePicker
+                        value={parseDateLocal(ppicExportDateEnd)}
+                        onChange={(date) => setPpicExportDateEnd(formatDateLocal(date))}
+                        maximumDate={maxDate}
+                      />
+
+                      <TouchableOpacity
+                        onPress={exportPpicByFilters}
+                        disabled={ppicExportingExcel}
+                        style={{
+                          marginTop: 16,
+                          backgroundColor: ppicExportingExcel ? "#cbd5e1" : "#0ea5e9",
+                          borderRadius: 10,
+                          paddingVertical: 12,
+                          flexDirection: "row",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          gap: 8,
+                        }}
+                      >
+                        <Download color="#fff" size={18} />
+                        <Text style={{ color: "#fff", fontWeight: "700", fontSize: 14 }}>
+                          {ppicExportingExcel
+                            ? t("dashboard.ppicExportExcelExporting")
+                            : t("dashboard.ppicExportExcel")}
+                        </Text>
+                      </TouchableOpacity>
+                    </>
+                  )}
+
+                  {/* ── Incoming Material tab ── */}
+                  {ppicExportTab === "incoming" && (
+                    <>
+                      <Text style={[styles.ppicHomeLabel, { marginTop: 0 }]}>Material Type</Text>
+                      <View style={styles.ppicShiftRow}>
+                        {["all", "PC", "PE", "PET"].map((mt) => {
+                          const active = ppicIncomingMaterialType === mt;
+                          return (
+                            <TouchableOpacity
+                              key={`ppic-inc-mt-${mt}`}
+                              style={[styles.ppicShiftBtn, active && styles.ppicShiftBtnActive]}
+                              onPress={() => setPpicIncomingMaterialType(mt)}
+                            >
+                              <Text style={[styles.ppicShiftBtnText, active && styles.ppicShiftBtnTextActive]}>
+                                {mt === "all" ? t("dashboard.all") : mt}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+
+                      <Text style={[styles.ppicHomeLabel, { marginTop: 12 }]}>From</Text>
+                      <StationDatePicker
+                        value={parseDateLocal(ppicIncomingDateStart)}
+                        onChange={(date) => setPpicIncomingDateStart(formatDateLocal(date))}
+                        maximumDate={maxDate}
+                      />
+                      <Text style={[styles.ppicHomeLabel, { marginTop: 12 }]}>To</Text>
+                      <StationDatePicker
+                        value={parseDateLocal(ppicIncomingDateEnd)}
+                        onChange={(date) => setPpicIncomingDateEnd(formatDateLocal(date))}
+                        maximumDate={maxDate}
+                      />
+
+                      <TouchableOpacity
+                        onPress={exportIncomingMaterialExcel}
+                        disabled={ppicIncomingExportingExcel}
+                        style={{
+                          marginTop: 16,
+                          backgroundColor: ppicIncomingExportingExcel ? "#cbd5e1" : "#0ea5e9",
+                          borderRadius: 10,
+                          paddingVertical: 12,
+                          flexDirection: "row",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          gap: 8,
+                        }}
+                      >
+                        <Download color="#fff" size={18} />
+                        <Text style={{ color: "#fff", fontWeight: "700", fontSize: 14 }}>
+                          {ppicIncomingExportingExcel ? "Exporting…" : "Export Excel"}
+                        </Text>
+                      </TouchableOpacity>
+                    </>
+                  )}
                 </View>
 
                 {/* ── Station Overview ── */}
