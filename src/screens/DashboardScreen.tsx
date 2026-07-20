@@ -52,6 +52,15 @@ import {
   type LogsAllGrouped,
 } from "../utils/shareProductionLogsXlsx";
 import { shareIncomingMaterialAsXlsx } from "../utils/shareIncomingMaterialXlsx";
+import { shareByProductsAsXlsx } from "../utils/shareByProductsXlsx";
+
+/** Grouped response from GET /production/by-products/range */
+interface ByProductItem {
+  id: number; name: string; category: string; weight: number;
+  stationName: string; materialType: string; operator: string;
+}
+interface ByProductShiftGroup { shiftName: string; shiftTotal: number; items: ByProductItem[]; }
+interface ByProductDayGroup   { date: string; dayTotal: number; shifts: ByProductShiftGroup[]; }
 import { Station, ProductionLog, Shift } from "../types";
 
 /**
@@ -904,6 +913,17 @@ const DashboardScreen = ({ navigation }: any) => {
     formatDateLocal(new Date()),
   );
   const [ppicIncomingExportingExcel, setPpicIncomingExportingExcel] = useState(false);
+  // By-Products report section
+  const [byProductsReportDateStart, setByProductsReportDateStart] = useState(() =>
+    formatDateLocal(new Date()),
+  );
+  const [byProductsReportDateEnd, setByProductsReportDateEnd] = useState(() =>
+    formatDateLocal(new Date()),
+  );
+  const [byProductsReportMaterialType, setByProductsReportMaterialType] = useState<string>('all');
+  const [byProductsReportData, setByProductsReportData] = useState<ByProductDayGroup[]>([]);
+  const [byProductsReportLoading, setByProductsReportLoading] = useState(false);
+  const [byProductsReportExporting, setByProductsReportExporting] = useState(false);
 
   // Saved by-products on start shift page (editable after save)
   const [savedByProductsOnStartPage, setSavedByProductsOnStartPage] = useState<
@@ -1320,6 +1340,54 @@ const DashboardScreen = ({ navigation }: any) => {
       Alert.alert("Error", `Export failed.\n\n${detail}`);
     } finally {
       setPpicIncomingExportingExcel(false);
+    }
+  };
+
+  /** By-Products report: fetch by date range + material type. */
+  const fetchByProductsReport = async () => {
+    if (byProductsReportDateStart > byProductsReportDateEnd) {
+      Alert.alert("Error", "Start date must be on or before the end date.");
+      return;
+    }
+    setByProductsReportLoading(true);
+    setByProductsReportData([]);
+    try {
+      const res = await productionApi.getByProductsRange({
+        date_start: byProductsReportDateStart,
+        date_end:   byProductsReportDateEnd,
+        ...(byProductsReportMaterialType !== 'all' ? { material_type: byProductsReportMaterialType } : {}),
+      });
+      const payload = res.data as { success?: boolean; data?: ByProductDayGroup[] } | undefined;
+      if (!payload?.success || !Array.isArray(payload.data)) {
+        Alert.alert("Error", "Failed to fetch by-products data.");
+        return;
+      }
+      setByProductsReportData(payload.data);
+    } catch (e: unknown) {
+      Alert.alert("Error", e instanceof Error ? e.message : String(e));
+    } finally {
+      setByProductsReportLoading(false);
+    }
+  };
+
+  /** By-Products report: export to Excel (grouped layout matching the view). */
+  const exportByProductsExcel = async () => {
+    if (byProductsReportData.length === 0) {
+      Alert.alert("Error", "No data to export. Please fetch data first.");
+      return;
+    }
+    setByProductsReportExporting(true);
+    try {
+      const matLabel = byProductsReportMaterialType !== 'all' ? byProductsReportMaterialType : 'All';
+      const { format } = await shareByProductsAsXlsx(
+        byProductsReportData,
+        `By_Products_${matLabel}_${byProductsReportDateStart}_to_${byProductsReportDateEnd}`,
+      );
+      if (format === 'csv') Alert.alert("Success", "Exported as CSV (Excel not available on this device).");
+    } catch (e: unknown) {
+      Alert.alert("Error", `Export failed.\n\n${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setByProductsReportExporting(false);
     }
   };
 
@@ -6871,6 +6939,157 @@ const DashboardScreen = ({ navigation }: any) => {
                         </Text>
                       </TouchableOpacity>
                     </>
+                  )}
+                </View>
+
+                {/* ── By-Products Report ── */}
+                <View style={[styles.ppicHomeCard, { marginTop: 24 }]}>
+                  <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 12 }}>
+                    <Package color="#16a34a" size={16} />
+                    <Text style={[styles.ppicHomeLabel, { marginLeft: 6, marginBottom: 0 }]}>
+                      By-Products Report
+                    </Text>
+                  </View>
+
+                  {/* Material Type filter */}
+                  <Text style={[styles.ppicHomeLabel, { marginTop: 0 }]}>Material Type</Text>
+                  <View style={styles.ppicShiftRow}>
+                    {["all", "PC", "PE", "PET"].map((mt) => {
+                      const active = byProductsReportMaterialType === mt;
+                      return (
+                        <TouchableOpacity
+                          key={`bp-rpt-mt-${mt}`}
+                          style={[styles.ppicShiftBtn, active && styles.ppicShiftBtnActive]}
+                          onPress={() => { setByProductsReportMaterialType(mt); setByProductsReportData([]); }}
+                        >
+                          <Text style={[styles.ppicShiftBtnText, active && styles.ppicShiftBtnTextActive]}>
+                            {mt === "all" ? t("dashboard.all") : mt}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+
+                  {/* Date range */}
+                  <Text style={[styles.ppicHomeLabel, { marginTop: 12 }]}>From</Text>
+                  <StationDatePicker
+                    value={parseDateLocal(byProductsReportDateStart)}
+                    onChange={(date) => { setByProductsReportDateStart(formatDateLocal(date)); setByProductsReportData([]); }}
+                    maximumDate={maxDate}
+                  />
+                  <Text style={[styles.ppicHomeLabel, { marginTop: 12 }]}>To</Text>
+                  <StationDatePicker
+                    value={parseDateLocal(byProductsReportDateEnd)}
+                    onChange={(date) => { setByProductsReportDateEnd(formatDateLocal(date)); setByProductsReportData([]); }}
+                    maximumDate={maxDate}
+                  />
+
+                  {/* Fetch button */}
+                  <TouchableOpacity
+                    onPress={fetchByProductsReport}
+                    disabled={byProductsReportLoading}
+                    style={{
+                      marginTop: 14,
+                      backgroundColor: byProductsReportLoading ? "#cbd5e1" : "#16a34a",
+                      borderRadius: 10,
+                      paddingVertical: 11,
+                      flexDirection: "row",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 8,
+                    }}
+                  >
+                    {byProductsReportLoading
+                      ? <ActivityIndicator color="#fff" size="small" />
+                      : <FileText color="#fff" size={16} />}
+                    <Text style={{ color: "#fff", fontWeight: "700", fontSize: 14 }}>
+                      {byProductsReportLoading ? "Loading…" : "View By-Products"}
+                    </Text>
+                  </TouchableOpacity>
+
+                  {/* Data — grouped by day → shift → items */}
+                  {byProductsReportData.length > 0 && (
+                    <>
+                      {/* Grand total summary */}
+                      {(() => {
+                        let totalItems = 0, grandTotal = 0;
+                        for (const d of byProductsReportData) { grandTotal += d.dayTotal; for (const s of d.shifts) totalItems += s.items.length; }
+                        return (
+                          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 16, marginBottom: 10 }}>
+                            <Text style={{ fontSize: 13, fontWeight: "600", color: "#374151" }}>{totalItems} item{totalItems !== 1 ? "s" : ""}</Text>
+                            <Text style={{ fontSize: 12, color: "#6b7280" }}>Grand Total: {grandTotal.toFixed(2)} kg</Text>
+                          </View>
+                        );
+                      })()}
+
+                      {byProductsReportData.map((day) => {
+                        const fmtDate = (() => { const d = new Date(day.date); return `${String(d.getUTCDate()).padStart(2,'0')}/${String(d.getUTCMonth()+1).padStart(2,'0')}/${d.getUTCFullYear()}`; })();
+                        return (
+                          <View key={`bp-day-${day.date}`} style={{ marginBottom: 10 }}>
+                            {/* Day header */}
+                            <View style={{ flexDirection: "row", justifyContent: "space-between", backgroundColor: "#1B5E20", borderRadius: 6, paddingVertical: 7, paddingHorizontal: 10, marginBottom: 4 }}>
+                              <Text style={{ color: "#fff", fontWeight: "700", fontSize: 12 }}>{fmtDate}</Text>
+                              <Text style={{ color: "#fff", fontSize: 12 }}>Day Total: {day.dayTotal.toFixed(2)} kg</Text>
+                            </View>
+
+                            {day.shifts.map((shift) => (
+                              <View key={`bp-shift-${day.date}-${shift.shiftName}`} style={{ marginBottom: 6 }}>
+                                {/* Shift sub-header */}
+                                <View style={{ flexDirection: "row", justifyContent: "space-between", backgroundColor: "#E3F2FD", borderRadius: 4, paddingVertical: 5, paddingHorizontal: 10, marginBottom: 2 }}>
+                                  <Text style={{ fontWeight: "600", fontSize: 11, color: "#1565C0" }}>{shift.shiftName}</Text>
+                                  <Text style={{ fontSize: 11, color: "#1565C0" }}>{shift.shiftTotal.toFixed(2)} kg</Text>
+                                </View>
+
+                                {/* Item rows */}
+                                {shift.items.map((item, idx) => (
+                                  <View key={`bp-item-${item.id}`} style={{ flexDirection: "row", paddingVertical: 5, paddingHorizontal: 10, backgroundColor: idx % 2 === 0 ? "#F1F8E9" : "#fff", borderBottomWidth: 1, borderBottomColor: "#e5e7eb" }}>
+                                    <View style={{ flex: 1.6 }}>
+                                      <Text style={{ fontSize: 11, color: "#111827", fontWeight: "600" }}>{item.name || "—"}</Text>
+                                      <Text style={{ fontSize: 10, color: "#6b7280" }}>{item.stationName || ""}{item.category ? ` · ${item.category}` : ""}</Text>
+                                    </View>
+                                    <View style={{ flex: 1 }}>
+                                      <Text style={{ fontSize: 10, color: "#374151" }}>{item.operator || ""}</Text>
+                                      <Text style={{ fontSize: 10, color: "#6b7280" }}>{item.materialType || ""}</Text>
+                                    </View>
+                                    <Text style={{ fontSize: 11, color: "#111827", width: 60, textAlign: "right", fontWeight: "600" }}>
+                                      {(Number(item.weight) || 0).toFixed(2)}
+                                    </Text>
+                                  </View>
+                                ))}
+                              </View>
+                            ))}
+                          </View>
+                        );
+                      })}
+
+                      {/* Export button */}
+                      <TouchableOpacity
+                        onPress={exportByProductsExcel}
+                        disabled={byProductsReportExporting}
+                        style={{
+                          marginTop: 14,
+                          backgroundColor: byProductsReportExporting ? "#cbd5e1" : "#0ea5e9",
+                          borderRadius: 10,
+                          paddingVertical: 11,
+                          flexDirection: "row",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          gap: 8,
+                        }}
+                      >
+                        <Download color="#fff" size={16} />
+                        <Text style={{ color: "#fff", fontWeight: "700", fontSize: 14 }}>
+                          {byProductsReportExporting ? "Exporting…" : "Export Excel"}
+                        </Text>
+                      </TouchableOpacity>
+                    </>
+                  )}
+
+                  {/* Empty state after fetch */}
+                  {!byProductsReportLoading && byProductsReportData.length === 0 && (
+                    <Text style={{ marginTop: 12, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>
+                      Select filters and tap View By-Products
+                    </Text>
                   )}
                 </View>
 

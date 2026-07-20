@@ -65,6 +65,8 @@ export const productionApi = {
     [key: string]: any;
   }) =>
     client.post('/production/log', data),
+  getByProductsRange: (params: { date_start: string; date_end: string; material_type?: string }) =>
+    client.get('/production/by-products/range', { params }),
   logByProducts: (shiftId: number, byProducts: any[]) =>
     client.post('/production/by-products', { shiftId, byProducts }),
   getByProducts: (shiftId: number) =>
