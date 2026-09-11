@@ -8,6 +8,7 @@
     "android:reverse": "sh scripts/android-reverse-port.sh",
     "ios": "npx expo run:ios",
     "web": "npx expo start --web",
+    "web-build":"npx expo export --platform web",
     "build:apk": "cross-env NODE_OPTIONS=--max-old-space-size=4096 CI=true NODE_ENV=production cmd /c \"cd android && gradlew.bat assembleRelease --no-build-cache\"",
     "build:apk:clean": "sh scripts/build-apk-clean.sh",
     "build:release": "npm run build:apk && npm run apk:path",

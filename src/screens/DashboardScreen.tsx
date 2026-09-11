@@ -220,6 +220,7 @@ const PET_CRUSHER_RAPID_INPUT_SUB_LINES = ["Rapid", "CRP"];
 
 import { CameraView, Camera } from "expo-camera";
 import * as ImagePicker from "expo-image-picker";
+import * as FileSystem from "expo-file-system/legacy";
 import QRCode from "react-native-qrcode-svg";
 import StationDatePicker from "../components/StationDatePicker";
 
@@ -584,6 +585,8 @@ const DashboardScreen = ({ navigation }: any) => {
   const isShiftEnded = shiftEndedAt !== null;
   const [backendShiftId, setBackendShiftId] = useState<number | null>(null);
   const [shiftLogs, setShiftLogs] = useState<ProductionLog[]>([]);
+  // One-time-per-log-id guard so the local-photo migration below never re-uploads the same log twice in a session.
+  const migratedPhotoLogIds = useRef<Set<number>>(new Set());
 
   // Selection State
   const [selectedStation, setSelectedStation] = useState<Station | null>(null);
@@ -888,6 +891,8 @@ const DashboardScreen = ({ navigation }: any) => {
   >(null);
   const [ppicMaterialOptions, setPpicMaterialOptions] = useState<string[]>([]);
   const [ppicExportingExcel, setPpicExportingExcel] = useState(false);
+  // PPIC Station Overview: full-size photo viewer
+  const [zoomedPhotoUri, setZoomedPhotoUri] = useState<string | null>(null);
   // PPIC Export Report panel: operator + station + date-range filters
   const [ppicOperators, setPpicOperators] = useState<
     { id: number; name: string; material_type?: string }[]
@@ -3798,6 +3803,101 @@ const DashboardScreen = ({ navigation }: any) => {
     }
   };
 
+  /**
+   * Captured photos start out as local device URIs (file:// on native, blob: on web) that are
+   * meaningless outside the device that took them. Upload each to the server and swap in the
+   * permanent URL it returns before the log is saved, so PPIC can view them from any device.
+   */
+  const uploadCapturedPhotos = async (uris: string[]): Promise<string[]> => {
+    const uploaded: string[] = [];
+    for (const uri of uris) {
+      const formData = new FormData();
+      if (Platform.OS === "web") {
+        const blob = await (await fetch(uri)).blob();
+        formData.append(
+          "photo",
+          blob,
+          `photo_${Date.now()}_${uploaded.length}.jpg`,
+        );
+      } else {
+        formData.append("photo", {
+          uri,
+          name: `photo_${Date.now()}_${uploaded.length}.jpg`,
+          type: "image/jpeg",
+        } as any);
+      }
+      const res = await productionApi.uploadPhoto(formData);
+      if (res.data?.success && res.data?.url) {
+        uploaded.push(res.data.url);
+      }
+    }
+    return uploaded;
+  };
+
+  /**
+   * Best-effort migration for logs saved before the upload fix: their photo_url still holds
+   * local file:// URIs from this device's own capture. If the file still exists in the app's
+   * cache on THIS device, upload it and patch the log's photo_url to the new server URL. Files
+   * from any other device, or already purged from this device's cache, cannot be recovered —
+   * there is no way to retrieve image bytes the server never received.
+   */
+  useEffect(() => {
+    if (Platform.OS === "web" || !shiftLogs || shiftLogs.length === 0) return;
+    const candidates = (shiftLogs as any[]).filter(
+      (log) =>
+        log?.id != null &&
+        !migratedPhotoLogIds.current.has(log.id) &&
+        String(log.photo_url ?? "").includes("file://"),
+    );
+    if (candidates.length === 0) return;
+
+    let cancelled = false;
+    (async () => {
+      for (const log of candidates) {
+        if (cancelled) return;
+        migratedPhotoLogIds.current.add(log.id);
+        const parts = String(log.photo_url ?? "")
+          .split(",")
+          .map((p: string) => p.trim())
+          .filter(Boolean);
+        const localUris = parts.filter((p: string) => p.startsWith("file://"));
+        const remoteUris = parts.filter((p: string) => !p.startsWith("file://"));
+        if (localUris.length === 0) continue;
+
+        const stillOnDevice: string[] = [];
+        for (const uri of localUris) {
+          try {
+            const info = await FileSystem.getInfoAsync(uri);
+            if (info.exists) stillOnDevice.push(uri);
+          } catch {
+            // Not accessible from this device — skip.
+          }
+        }
+        if (stillOnDevice.length === 0) continue;
+
+        try {
+          const uploaded = await uploadCapturedPhotos(stillOnDevice);
+          if (uploaded.length === 0) continue;
+          const newPhotoUrl = [...remoteUris, ...uploaded].join(",");
+          await productionApi.updateProductionLogFields(log.id, {
+            photo_url: newPhotoUrl,
+          });
+          setShiftLogs((prev) =>
+            (prev as any[]).map((l: any) =>
+              l.id === log.id ? { ...l, photo_url: newPhotoUrl } : l,
+            ),
+          );
+        } catch (e) {
+          console.error("Photo migration failed for log", log.id, e);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [shiftLogs]);
+
   const handleTakePhoto = async () => {
     // Web: CameraView preview is unreliable — use image picker (gallery / file chooser).
     if (Platform.OS === "web") {
@@ -4634,8 +4734,18 @@ const DashboardScreen = ({ navigation }: any) => {
       // Status must be exactly what the user chose (Final = Completed, Temporary = pending). Prefer value passed at SAVE tap.
       const chosenStatus: "pending" | "Completed" =
         statusAtTap ?? previewBagStatusRef.current ?? previewBagStatus;
-      const photoUrl =
-        capturedImages.length > 0 ? capturedImages.join(",") : null;
+      let photoUrl: string | null = null;
+      if (capturedImages.length > 0) {
+        try {
+          const uploadedUrls = await uploadCapturedPhotos(capturedImages);
+          photoUrl = uploadedUrls.length > 0 ? uploadedUrls.join(",") : null;
+        } catch (e) {
+          console.error("Photo upload failed:", e);
+          Alert.alert(t("common.error"), t("messages.failedToCapturePhoto"));
+          setIsLoading(false);
+          return;
+        }
+      }
       const saveSubLine = isPE
         ? selectedStation.name?.toLowerCase().includes("extrusion")
           ? selectedSubLine
@@ -7349,6 +7459,12 @@ const DashboardScreen = ({ navigation }: any) => {
                                       : log.status === "Cancelled"
                                         ? "#ef4444"
                                         : "#22c55e";
+                                  const logPhotos = String(
+                                    log.photo_url ?? log.photoUrl ?? "",
+                                  )
+                                    .split(",")
+                                    .map((p: string) => p.trim())
+                                    .filter(Boolean);
                                   return (
                                     <View
                                       key={log.id}
@@ -7473,6 +7589,31 @@ const DashboardScreen = ({ navigation }: any) => {
                                             "—"}
                                         </Text>
                                       </View>
+                                      {logPhotos.length > 0 && (
+                                        <ScrollView
+                                          horizontal
+                                          showsHorizontalScrollIndicator={false}
+                                          style={styles.ppicLogPhotosRow}
+                                          contentContainerStyle={{ gap: 8 }}
+                                        >
+                                          {logPhotos.map(
+                                            (uri: string, pIdx: number) => (
+                                              <TouchableOpacity
+                                                key={pIdx}
+                                                onPress={() =>
+                                                  setZoomedPhotoUri(uri)
+                                                }
+                                                activeOpacity={0.8}
+                                              >
+                                                <Image
+                                                  source={{ uri }}
+                                                  style={styles.ppicLogPhotoThumb}
+                                                />
+                                              </TouchableOpacity>
+                                            ),
+                                          )}
+                                        </ScrollView>
+                                      )}
                                     </View>
                                   );
                                 })
@@ -20037,6 +20178,34 @@ const DashboardScreen = ({ navigation }: any) => {
           </View>
         </View>
       </Modal>
+
+      {/* PPIC Station Overview: full-size photo viewer */}
+      <Modal
+        visible={!!zoomedPhotoUri}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setZoomedPhotoUri(null)}
+      >
+        <TouchableOpacity
+          style={styles.zoomedPhotoOverlay}
+          activeOpacity={1}
+          onPress={() => setZoomedPhotoUri(null)}
+        >
+          <TouchableOpacity
+            style={styles.zoomedPhotoCloseButton}
+            onPress={() => setZoomedPhotoUri(null)}
+          >
+            <X color="#FFF" size={28} />
+          </TouchableOpacity>
+          {zoomedPhotoUri && (
+            <Image
+              source={{ uri: zoomedPhotoUri }}
+              style={styles.zoomedPhotoImage}
+              resizeMode="contain"
+            />
+          )}
+        </TouchableOpacity>
+      </Modal>
       <Modal visible={showPrintPreview} transparent animationType="fade">
         <View style={styles.previewOverlay}>
           <View style={styles.previewContent}>
@@ -21339,6 +21508,33 @@ const styles = StyleSheet.create({
   ppicShiftLogRemarkBlock: {
     marginTop: 8,
     width: "100%",
+  },
+  ppicLogPhotosRow: {
+    marginTop: 8,
+    width: "100%",
+  },
+  ppicLogPhotoThumb: {
+    width: 48,
+    height: 48,
+    borderRadius: 6,
+    backgroundColor: "#e2e8f0",
+  },
+  zoomedPhotoOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.9)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  zoomedPhotoCloseButton: {
+    position: "absolute",
+    top: 48,
+    right: 20,
+    zIndex: 1,
+    padding: 8,
+  },
+  zoomedPhotoImage: {
+    width: "92%",
+    height: "80%",
   },
   shiftLogQr: {
     fontSize: 13,

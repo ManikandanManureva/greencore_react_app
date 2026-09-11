@@ -1,7 +1,20 @@
+import { Platform } from 'react-native';
 import client from './client';
 import { ProductionLog } from '../types';
 
 export const productionApi = {
+  /**
+   * Uploads a captured batch photo; returns { success, url } with a permanent, publicly-reachable URL.
+   * On web, Content-Type is left for the browser to set so it can attach the multipart boundary itself —
+   * setting it manually here would omit the boundary and break parsing on the server.
+   */
+  uploadPhoto: (formData: FormData) =>
+    client.post('/production/upload-photo', formData, {
+      headers:
+        Platform.OS === 'web'
+          ? undefined
+          : { 'Content-Type': 'multipart/form-data' },
+    }),
   getStations: () => client.get('/production/stations'),
   getMaterials: () => client.get('/production/materials'),
   startShift: (shiftTypeId: number) =>
@@ -167,7 +180,7 @@ export const productionApi = {
   updateLogWeight: (logId: number, weight: number) => {
     return client.put('/production/update-log-weight', { logId, weight });
   },
-  /** Backoffice-style update by log id (PPIC uses this for per-output remark). */
+  /** Backoffice-style update by log id (PPIC uses this for per-output remark; also used to patch in a migrated photo_url). */
   updateProductionLogFields: (
     logId: number,
     body: {
@@ -175,6 +188,7 @@ export const productionApi = {
       status?: string;
       sub_line?: string;
       remark?: string | null;
+      photo_url?: string | null;
     },
   ) => client.put(`/production/logs-update/${logId}`, body),
 };
