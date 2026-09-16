@@ -46,7 +46,12 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { productionLineTitleKeyFromRole } from "../utils/productionLine";
 import { useAuth } from "../navigation/AuthContext";
 import { productionApi, masterDataApi } from "../api/production";
-import { inventoryApi } from "../api/inventory";
+import {
+  inventoryApi,
+  INVENTORY_STATUSES,
+  REGION_OPTIONS,
+  type RawMaterial,
+} from "../api/inventory";
 import {
   shareProductionLogsAsXlsx,
   type LogsAllGrouped,
@@ -62,6 +67,31 @@ interface ByProductItem {
 interface ByProductShiftGroup { shiftName: string; shiftTotal: number; items: ByProductItem[]; }
 interface ByProductDayGroup   { date: string; dayTotal: number; shifts: ByProductShiftGroup[]; }
 import { Station, ProductionLog, Shift } from "../types";
+
+/**
+ * Incoming Material edit: coarse Material Type stays PC/PE/PET — several backend reports
+ * (inventory station summary, PE raw-material ledger) filter on materialType being exactly
+ * one of these three, so a PE grade must NOT be written into this column.
+ */
+const INCOMING_MATERIAL_TYPE_OPTIONS = ["PC", "PE", "PET"];
+
+/** PE-line grade, stored in materialDescription (free text) — only offered when Material Type is PE. */
+const PE_MATERIAL_GRADE_OPTIONS = ["PE SUPER", "PE 1", "EVA SUPER", "EVA 1"];
+
+/** Formats a gate-entry date (+ optional time) as "dd/mm/yyyy hh:mm". */
+function formatIncomingDateTime(
+  dateStr?: string | null,
+  timeStr?: string | null,
+): string {
+  if (!dateStr) return "—";
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return String(dateStr);
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const yyyy = d.getUTCFullYear();
+  const time = timeStr ? timeStr.slice(0, 5) : "00:00";
+  return `${dd}/${mm}/${yyyy} ${time}`;
+}
 
 /**
  * True for extrusion / PE extruder / PET Boretech row.
@@ -918,6 +948,18 @@ const DashboardScreen = ({ navigation }: any) => {
     formatDateLocal(new Date()),
   );
   const [ppicIncomingExportingExcel, setPpicIncomingExportingExcel] = useState(false);
+  // Incoming Material: paginated listing + edit (PPIC can view & correct gate-entry records)
+  const [ppicIncomingRecords, setPpicIncomingRecords] = useState<RawMaterial[]>([]);
+  const [ppicIncomingListLoading, setPpicIncomingListLoading] = useState(false);
+  const [ppicIncomingPage, setPpicIncomingPage] = useState(1);
+  const [ppicIncomingTotalPages, setPpicIncomingTotalPages] = useState(1);
+  const [ppicIncomingTotal, setPpicIncomingTotal] = useState(0);
+  const [ppicIncomingEditRecord, setPpicIncomingEditRecord] =
+    useState<RawMaterial | null>(null);
+  const [ppicIncomingEditForm, setPpicIncomingEditForm] = useState<
+    Record<string, string>
+  >({});
+  const [ppicIncomingSaving, setPpicIncomingSaving] = useState(false);
   // By-Products report section
   const [byProductsReportDateStart, setByProductsReportDateStart] = useState(() =>
     formatDateLocal(new Date()),
@@ -1345,6 +1387,92 @@ const DashboardScreen = ({ navigation }: any) => {
       Alert.alert("Error", `Export failed.\n\n${detail}`);
     } finally {
       setPpicIncomingExportingExcel(false);
+    }
+  };
+
+  /** Incoming Material: load one page of gate-entry records for the current date/material filters. */
+  const loadPpicIncomingRecords = async (page: number = 1) => {
+    if (ppicIncomingDateStart > ppicIncomingDateEnd) {
+      Alert.alert("Error", "Start date must be on or before the end date.");
+      return;
+    }
+    setPpicIncomingListLoading(true);
+    try {
+      const res = await inventoryApi.list({
+        date_start: ppicIncomingDateStart,
+        date_end: ppicIncomingDateEnd,
+        ...(ppicIncomingMaterialType !== "all"
+          ? { materialType: ppicIncomingMaterialType }
+          : {}),
+        page,
+        limit: 20,
+      });
+      const body = res.data;
+      if (!body?.success) throw new Error("Request failed");
+      setPpicIncomingRecords(body.data || []);
+      setPpicIncomingPage(body.page || page);
+      setPpicIncomingTotalPages(body.totalPages || 1);
+      setPpicIncomingTotal(body.total || 0);
+    } catch (e: any) {
+      const msg =
+        e?.response?.data?.message ||
+        e?.message ||
+        "Failed to load incoming material data.";
+      Alert.alert("Error", msg);
+    } finally {
+      setPpicIncomingListLoading(false);
+    }
+  };
+
+  const openPpicIncomingEdit = (record: RawMaterial) => {
+    setPpicIncomingEditRecord(record);
+    setPpicIncomingEditForm({
+      materialType: record.materialType ?? "",
+      materialDescription: record.materialDescription ?? "",
+      quantity: record.quantity != null ? String(record.quantity) : "",
+      supplier: record.supplier ?? "",
+      truckId: record.truckId ?? "",
+      plant: record.plant ?? "",
+      entryWeight: record.entryWeight != null ? String(record.entryWeight) : "",
+      exitWeight: record.exitWeight != null ? String(record.exitWeight) : "",
+      netWeight: record.netWeight != null ? String(record.netWeight) : "",
+      deliveryNote: record.deliveryNote ?? "",
+      notes: record.notes ?? "",
+      status: record.status ?? "",
+      region: record.region ?? "",
+    });
+  };
+
+  const savePpicIncomingEdit = async () => {
+    if (!ppicIncomingEditRecord) return;
+    setPpicIncomingSaving(true);
+    try {
+      const f = ppicIncomingEditForm;
+      const payload: Record<string, any> = {
+        materialType: f.materialType.trim() || null,
+        materialDescription: f.materialDescription.trim() || null,
+        quantity: f.quantity.trim() === "" ? null : Number(f.quantity),
+        supplier: f.supplier.trim() || null,
+        truckId: f.truckId.trim() || null,
+        plant: f.plant.trim() || null,
+        entryWeight: f.entryWeight.trim() === "" ? null : Number(f.entryWeight),
+        exitWeight: f.exitWeight.trim() === "" ? null : Number(f.exitWeight),
+        netWeight: f.netWeight.trim() === "" ? null : Number(f.netWeight),
+        deliveryNote: f.deliveryNote.trim() || null,
+        notes: f.notes.trim() || null,
+        status: f.status.trim() || null,
+        // Region only applies to PET — clear it if the type was changed away from PET.
+        region: f.materialType.trim() === "PET" ? f.region.trim() || null : null,
+      };
+      await inventoryApi.update(ppicIncomingEditRecord.id, payload);
+      setPpicIncomingEditRecord(null);
+      await loadPpicIncomingRecords(ppicIncomingPage);
+    } catch (e: any) {
+      const msg =
+        e?.response?.data?.message || e?.message || "Failed to save changes.";
+      Alert.alert("Error", msg);
+    } finally {
+      setPpicIncomingSaving(false);
     }
   };
 
@@ -7048,6 +7176,134 @@ const DashboardScreen = ({ navigation }: any) => {
                           {ppicIncomingExportingExcel ? "Exporting…" : "Export Excel"}
                         </Text>
                       </TouchableOpacity>
+
+                      <TouchableOpacity
+                        onPress={() => loadPpicIncomingRecords(1)}
+                        disabled={ppicIncomingListLoading}
+                        style={{
+                          marginTop: 10,
+                          backgroundColor: ppicIncomingListLoading ? "#cbd5e1" : "#17a34a",
+                          borderRadius: 10,
+                          paddingVertical: 12,
+                          flexDirection: "row",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          gap: 8,
+                        }}
+                      >
+                        <Search color="#fff" size={18} />
+                        <Text style={{ color: "#fff", fontWeight: "700", fontSize: 14 }}>
+                          {ppicIncomingListLoading ? "Loading…" : "View Records"}
+                        </Text>
+                      </TouchableOpacity>
+
+                      {/* ── Paginated incoming material records, editable by PPIC ── */}
+                      {ppicIncomingListLoading ? (
+                        <View style={{ alignItems: "center", paddingVertical: 20 }}>
+                          <ActivityIndicator size="large" color="#17a34a" />
+                        </View>
+                      ) : ppicIncomingRecords.length > 0 ? (
+                        <View style={{ marginTop: 16 }}>
+                          <Text style={{ fontSize: 12, color: "#64748b", marginBottom: 8, fontWeight: "600" }}>
+                            {ppicIncomingTotal} record{ppicIncomingTotal === 1 ? "" : "s"} · Page {ppicIncomingPage} of {ppicIncomingTotalPages}
+                          </Text>
+                          {ppicIncomingRecords.map((rec) => (
+                            <View
+                              key={rec.id}
+                              style={{
+                                backgroundColor: "#F8FAFC",
+                                borderWidth: 1,
+                                borderColor: "#e2e8f0",
+                                borderRadius: 10,
+                                padding: 12,
+                                marginBottom: 8,
+                              }}
+                            >
+                              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+                                <Text style={{ fontSize: 13, fontWeight: "700", color: "#1e293b", flex: 1 }} numberOfLines={1}>
+                                  {rec.truckId || "—"}
+                                  {rec.deliveryNote ? `  ·  DN ${rec.deliveryNote}` : ""}
+                                </Text>
+                                <TouchableOpacity
+                                  onPress={() => openPpicIncomingEdit(rec)}
+                                  style={{ flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 8, paddingVertical: 4 }}
+                                >
+                                  <Pencil color="#0ea5e9" size={14} />
+                                  <Text style={{ color: "#0ea5e9", fontWeight: "700", fontSize: 12 }}>Edit</Text>
+                                </TouchableOpacity>
+                              </View>
+                              <View style={{ flexDirection: "row", flexWrap: "wrap", marginTop: 6, gap: 4 }}>
+                                <Text style={{ fontSize: 11, color: "#64748b" }}>
+                                  {formatIncomingDateTime(rec.entrydate, rec.entrytime)}
+                                </Text>
+                                <Text style={{ fontSize: 11, color: "#94a3b8" }}>·</Text>
+                                <Text style={{ fontSize: 11, color: "#64748b" }}>
+                                  {rec.supplier || "—"}
+                                </Text>
+                                <Text style={{ fontSize: 11, color: "#94a3b8" }}>·</Text>
+                                <Text style={{ fontSize: 11, color: "#0ea5e9", fontWeight: "700" }}>
+                                  {rec.materialType || "—"}
+                                </Text>
+                                {rec.quantity != null && (
+                                  <>
+                                    <Text style={{ fontSize: 11, color: "#94a3b8" }}>·</Text>
+                                    <Text style={{ fontSize: 11, color: "#64748b" }}>
+                                      Qty {rec.quantity} Pcs
+                                    </Text>
+                                  </>
+                                )}
+                                {rec.materialType === "PET" && rec.region && (
+                                  <>
+                                    <Text style={{ fontSize: 11, color: "#94a3b8" }}>·</Text>
+                                    <Text style={{ fontSize: 11, color: "#0d9488", fontWeight: "700" }}>
+                                      {rec.region}
+                                    </Text>
+                                  </>
+                                )}
+                                <Text style={{ fontSize: 11, color: "#94a3b8" }}>·</Text>
+                                <Text style={{ fontSize: 11, color: "#64748b" }}>
+                                  Net {rec.netWeight ?? "—"} kg
+                                </Text>
+                              </View>
+                            </View>
+                          ))}
+
+                          {/* Pagination controls */}
+                          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 8 }}>
+                            <TouchableOpacity
+                              disabled={ppicIncomingPage <= 1}
+                              onPress={() => loadPpicIncomingRecords(ppicIncomingPage - 1)}
+                              style={{
+                                paddingHorizontal: 14,
+                                paddingVertical: 8,
+                                borderRadius: 8,
+                                backgroundColor: ppicIncomingPage <= 1 ? "#e2e8f0" : "#0ea5e9",
+                              }}
+                            >
+                              <Text style={{ color: ppicIncomingPage <= 1 ? "#94a3b8" : "#fff", fontWeight: "700", fontSize: 13 }}>
+                                Prev
+                              </Text>
+                            </TouchableOpacity>
+                            <Text style={{ fontSize: 12, color: "#64748b" }}>
+                              {ppicIncomingPage} / {ppicIncomingTotalPages}
+                            </Text>
+                            <TouchableOpacity
+                              disabled={ppicIncomingPage >= ppicIncomingTotalPages}
+                              onPress={() => loadPpicIncomingRecords(ppicIncomingPage + 1)}
+                              style={{
+                                paddingHorizontal: 14,
+                                paddingVertical: 8,
+                                borderRadius: 8,
+                                backgroundColor: ppicIncomingPage >= ppicIncomingTotalPages ? "#e2e8f0" : "#0ea5e9",
+                              }}
+                            >
+                              <Text style={{ color: ppicIncomingPage >= ppicIncomingTotalPages ? "#94a3b8" : "#fff", fontWeight: "700", fontSize: 13 }}>
+                                Next
+                              </Text>
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                      ) : null}
                     </>
                   )}
                 </View>
@@ -20205,6 +20461,288 @@ const DashboardScreen = ({ navigation }: any) => {
             />
           )}
         </TouchableOpacity>
+      </Modal>
+
+      {/* Incoming Material: PPIC edit modal */}
+      <Modal
+        visible={!!ppicIncomingEditRecord}
+        animationType="slide"
+        transparent={false}
+        onRequestClose={() => setPpicIncomingEditRecord(null)}
+      >
+        <SafeAreaView style={{ flex: 1, backgroundColor: "#f3f4f6" }} edges={["top", "bottom"]}>
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              paddingHorizontal: 12,
+              paddingVertical: 10,
+              backgroundColor: "#fff",
+              borderBottomWidth: 1,
+              borderBottomColor: "#e5e7eb",
+              gap: 8,
+            }}
+          >
+            <TouchableOpacity
+              onPress={() => setPpicIncomingEditRecord(null)}
+              style={{ padding: 6 }}
+            >
+              <X color="#1f2937" size={24} />
+            </TouchableOpacity>
+            <Text style={{ fontSize: 18, fontWeight: "700", color: "#1f2937", flex: 1 }}>
+              Edit Incoming Material {ppicIncomingEditRecord?.refId ? `— ${ppicIncomingEditRecord.refId}` : ""}
+            </Text>
+          </View>
+
+          <ScrollView contentContainerStyle={{ padding: 16 }} keyboardShouldPersistTaps="handled">
+            <Text style={{ fontSize: 14, fontWeight: "800", color: "#17a34a", marginTop: 4, marginBottom: 6 }}>
+              Material Type
+            </Text>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+              {INCOMING_MATERIAL_TYPE_OPTIONS.map((mt) => {
+                const active = ppicIncomingEditForm.materialType === mt;
+                return (
+                  <TouchableOpacity
+                    key={`inc-edit-mt-${mt}`}
+                    onPress={() =>
+                      setPpicIncomingEditForm((prev) => ({ ...prev, materialType: mt }))
+                    }
+                    style={{
+                      paddingHorizontal: 14,
+                      paddingVertical: 8,
+                      borderRadius: 16,
+                      backgroundColor: active ? "#17a34a" : "#fff",
+                      borderWidth: 1,
+                      borderColor: active ? "#17a34a" : "#d1d5db",
+                    }}
+                  >
+                    <Text
+                      style={{
+                        fontSize: 13,
+                        fontWeight: "600",
+                        color: active ? "#fff" : "#4b5563",
+                      }}
+                    >
+                      {mt}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            {ppicIncomingEditForm.materialType === "PE" && (
+              <>
+                <Text style={{ fontSize: 14, fontWeight: "800", color: "#17a34a", marginTop: 18, marginBottom: 6 }}>
+                  PE Grade
+                </Text>
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+                  {PE_MATERIAL_GRADE_OPTIONS.map((grade) => {
+                    const active = ppicIncomingEditForm.materialDescription === grade;
+                    return (
+                      <TouchableOpacity
+                        key={`inc-edit-grade-${grade}`}
+                        onPress={() =>
+                          setPpicIncomingEditForm((prev) => ({
+                            ...prev,
+                            materialDescription: grade,
+                          }))
+                        }
+                        style={{
+                          paddingHorizontal: 14,
+                          paddingVertical: 8,
+                          borderRadius: 16,
+                          backgroundColor: active ? "#9333ea" : "#fff",
+                          borderWidth: 1,
+                          borderColor: active ? "#9333ea" : "#d1d5db",
+                        }}
+                      >
+                        <Text
+                          style={{
+                            fontSize: 13,
+                            fontWeight: "600",
+                            color: active ? "#fff" : "#4b5563",
+                          }}
+                        >
+                          {grade}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </>
+            )}
+
+            {ppicIncomingEditForm.materialType === "PET" && (
+              <>
+                <Text style={{ fontSize: 14, fontWeight: "800", color: "#17a34a", marginTop: 18, marginBottom: 6 }}>
+                  Region
+                </Text>
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+                  {REGION_OPTIONS.map((region) => {
+                    const active = ppicIncomingEditForm.region === region;
+                    return (
+                      <TouchableOpacity
+                        key={`inc-edit-region-${region}`}
+                        onPress={() =>
+                          setPpicIncomingEditForm((prev) => ({
+                            ...prev,
+                            region,
+                          }))
+                        }
+                        style={{
+                          paddingHorizontal: 14,
+                          paddingVertical: 8,
+                          borderRadius: 16,
+                          backgroundColor: active ? "#0d9488" : "#fff",
+                          borderWidth: 1,
+                          borderColor: active ? "#0d9488" : "#d1d5db",
+                        }}
+                      >
+                        <Text
+                          style={{
+                            fontSize: 13,
+                            fontWeight: "600",
+                            color: active ? "#fff" : "#4b5563",
+                          }}
+                        >
+                          {region}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </>
+            )}
+
+            <View style={{ marginTop: 14 }}>
+              <Text style={{ fontSize: 12, color: "#6b7280", marginBottom: 4, fontWeight: "600" }}>
+                Plant
+              </Text>
+              <TextInput
+                style={{
+                  backgroundColor: "#fff",
+                  borderWidth: 1,
+                  borderColor: "#d1d5db",
+                  borderRadius: 8,
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                  fontSize: 14,
+                  color: "#1f2937",
+                }}
+                value={ppicIncomingEditForm.plant ?? ""}
+                onChangeText={(v) =>
+                  setPpicIncomingEditForm((prev) => ({ ...prev, plant: v }))
+                }
+                placeholderTextColor="#9ca3af"
+              />
+            </View>
+
+            {/* Status editing hidden for now — form state still carries the record's existing status unchanged. */}
+            {false && (
+              <>
+                <Text style={{ fontSize: 14, fontWeight: "800", color: "#17a34a", marginTop: 18, marginBottom: 6 }}>
+                  Status
+                </Text>
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+                  {INVENTORY_STATUSES.map((s) => {
+                    const active = ppicIncomingEditForm.status === s;
+                    return (
+                      <TouchableOpacity
+                        key={`inc-edit-status-${s}`}
+                        onPress={() =>
+                          setPpicIncomingEditForm((prev) => ({ ...prev, status: s }))
+                        }
+                        style={{
+                          paddingHorizontal: 14,
+                          paddingVertical: 8,
+                          borderRadius: 16,
+                          backgroundColor: active ? "#0ea5e9" : "#fff",
+                          borderWidth: 1,
+                          borderColor: active ? "#0ea5e9" : "#d1d5db",
+                        }}
+                      >
+                        <Text
+                          style={{
+                            fontSize: 13,
+                            fontWeight: "600",
+                            color: active ? "#fff" : "#4b5563",
+                          }}
+                        >
+                          {s}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </>
+            )}
+
+            {(
+              [
+                { key: "quantity", label: "Quantity", numeric: true },
+                // For PE, materialDescription is set via the PE Grade picker above instead of free text.
+                ...(ppicIncomingEditForm.materialType === "PE"
+                  ? []
+                  : [{ key: "materialDescription", label: "Material Description" } as const]),
+                { key: "supplier", label: "Supplier" },
+                { key: "truckId", label: "Truck ID" },
+                { key: "entryWeight", label: "Entry Weight (kg)", numeric: true },
+                { key: "exitWeight", label: "Exit Weight (kg)", numeric: true },
+                { key: "netWeight", label: "Net Weight (kg)", numeric: true },
+                { key: "deliveryNote", label: "Delivery Note" },
+                { key: "notes", label: "Notes", multiline: true },
+              ] as const
+            ).map((f) => (
+              <View key={f.key} style={{ marginTop: 14 }}>
+                <Text style={{ fontSize: 12, color: "#6b7280", marginBottom: 4, fontWeight: "600" }}>
+                  {f.label}
+                </Text>
+                <TextInput
+                  style={{
+                    backgroundColor: "#fff",
+                    borderWidth: 1,
+                    borderColor: "#d1d5db",
+                    borderRadius: 8,
+                    paddingHorizontal: 12,
+                    paddingVertical: 10,
+                    fontSize: 14,
+                    color: "#1f2937",
+                    minHeight: (f as any).multiline ? 70 : undefined,
+                    textAlignVertical: (f as any).multiline ? "top" : "center",
+                  }}
+                  value={ppicIncomingEditForm[f.key] ?? ""}
+                  onChangeText={(v) =>
+                    setPpicIncomingEditForm((prev) => ({ ...prev, [f.key]: v }))
+                  }
+                  keyboardType={(f as any).numeric ? "numeric" : "default"}
+                  multiline={(f as any).multiline}
+                  placeholderTextColor="#9ca3af"
+                />
+              </View>
+            ))}
+
+            <TouchableOpacity
+              onPress={savePpicIncomingEdit}
+              disabled={ppicIncomingSaving}
+              style={{
+                backgroundColor: ppicIncomingSaving ? "#94a3b8" : "#17a34a",
+                borderRadius: 10,
+                paddingVertical: 14,
+                alignItems: "center",
+                marginTop: 24,
+              }}
+            >
+              {ppicIncomingSaving ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={{ color: "#fff", fontWeight: "800", fontSize: 15 }}>
+                  Save Changes
+                </Text>
+              )}
+            </TouchableOpacity>
+            <View style={{ height: 32 }} />
+          </ScrollView>
+        </SafeAreaView>
       </Modal>
       <Modal visible={showPrintPreview} transparent animationType="fade">
         <View style={styles.previewOverlay}>

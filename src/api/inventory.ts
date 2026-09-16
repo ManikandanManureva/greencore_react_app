@@ -32,7 +32,19 @@ export interface RawMaterial {
   returnNetWeight?: number | null;
   recordNoWBS?: string | null;
   plant?: string | null;
+  /** PET incoming material only — fixed set, see REGION_OPTIONS. */
+  region?: string | null;
 }
+
+/** Fixed regions for PET incoming material, editable by PPIC. */
+export const REGION_OPTIONS = [
+  'Jawa Barat',
+  'Jawa Timur',
+  'Jawa Tengah',
+  'Sumatra',
+  'Sulawesi',
+  'Bali',
+] as const;
 
 export interface RawMaterialListResponse {
   success: boolean;
