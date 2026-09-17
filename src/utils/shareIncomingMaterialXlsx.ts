@@ -102,7 +102,7 @@ function buildRows(records: RawMaterial[]): Record<string, string | number>[] {
     'Supplier':             r.supplier ?? '',
     'Plant':                r.plant ?? '',
     'Material Type':        r.materialType ?? '',
-    'Quantity':             r.quantity != null ? `${r.quantity} Pcs` : '',
+    'Quantity':             r.quantity ?? '',
     'Region':               r.region ?? '',
     'Material Description': r.materialDescription ?? '',
     'Entry Weight (kg)':    r.entryWeight ?? '',
@@ -134,6 +134,7 @@ function buildStyledWorksheet(rows: Record<string, string | number>[]) {
       const value = row[col.key];
       const isNum =
         col.key === 'S.No' ||
+        col.key === 'Quantity' ||
         col.key === 'Entry Weight (kg)' ||
         col.key === 'Exit Weight (kg)' ||
         col.key === 'Net Weight (kg)';

@@ -34,6 +34,11 @@ export interface RawMaterial {
   plant?: string | null;
   /** PET incoming material only — fixed set, see REGION_OPTIONS. */
   region?: string | null;
+  /** PE only: per-grade weights entered together; netWeight is their sum. */
+  peSuperWeight?: number | null;
+  pe1Weight?: number | null;
+  evaSuperWeight?: number | null;
+  eva1Weight?: number | null;
 }
 
 /** Fixed regions for PET incoming material, editable by PPIC. */

@@ -75,8 +75,13 @@ import { Station, ProductionLog, Shift } from "../types";
  */
 const INCOMING_MATERIAL_TYPE_OPTIONS = ["PC", "PE", "PET"];
 
-/** PE-line grade, stored in materialDescription (free text) — only offered when Material Type is PE. */
-const PE_MATERIAL_GRADE_OPTIONS = ["PE SUPER", "PE 1", "EVA SUPER", "EVA 1"];
+/** PE incoming material: fixed grade rows, each bound to its own weight field on the edit form. */
+const PE_GRADE_WEIGHT_FIELDS = [
+  { grade: "PE SUPER", key: "peSuperWeight" },
+  { grade: "PE 1", key: "pe1Weight" },
+  { grade: "EVA SUPER", key: "evaSuperWeight" },
+  { grade: "EVA 1", key: "eva1Weight" },
+] as const;
 
 /** Formats a gate-entry date (+ optional time) as "dd/mm/yyyy hh:mm". */
 function formatIncomingDateTime(
@@ -1440,30 +1445,58 @@ const DashboardScreen = ({ navigation }: any) => {
       notes: record.notes ?? "",
       status: record.status ?? "",
       region: record.region ?? "",
+      peSuperWeight: record.peSuperWeight != null ? String(record.peSuperWeight) : "",
+      pe1Weight: record.pe1Weight != null ? String(record.pe1Weight) : "",
+      evaSuperWeight: record.evaSuperWeight != null ? String(record.evaSuperWeight) : "",
+      eva1Weight: record.eva1Weight != null ? String(record.eva1Weight) : "",
     });
   };
 
   const savePpicIncomingEdit = async () => {
     if (!ppicIncomingEditRecord) return;
+    const f = ppicIncomingEditForm;
+    const isPe = f.materialType.trim() === "PE";
+    const peGradeSum = PE_GRADE_WEIGHT_FIELDS.reduce(
+      (sum, g) => sum + (Number(f[g.key]) || 0),
+      0,
+    );
+    if (isPe && peGradeSum <= 0) {
+      Alert.alert("Error", "Enter at least one PE grade weight.");
+      return;
+    }
     setPpicIncomingSaving(true);
     try {
-      const f = ppicIncomingEditForm;
       const payload: Record<string, any> = {
         materialType: f.materialType.trim() || null,
-        materialDescription: f.materialDescription.trim() || null,
-        quantity: f.quantity.trim() === "" ? null : Number(f.quantity),
         supplier: f.supplier.trim() || null,
         truckId: f.truckId.trim() || null,
         plant: f.plant.trim() || null,
         entryWeight: f.entryWeight.trim() === "" ? null : Number(f.entryWeight),
         exitWeight: f.exitWeight.trim() === "" ? null : Number(f.exitWeight),
-        netWeight: f.netWeight.trim() === "" ? null : Number(f.netWeight),
         deliveryNote: f.deliveryNote.trim() || null,
         notes: f.notes.trim() || null,
         status: f.status.trim() || null,
+        quantity: f.quantity.trim() === "" ? null : Number(f.quantity),
         // Region only applies to PET — clear it if the type was changed away from PET.
         region: f.materialType.trim() === "PET" ? f.region.trim() || null : null,
       };
+
+      if (isPe) {
+        // Net Weight is auto-derived as the sum of the 4 grade weights below.
+        payload.netWeight = peGradeSum;
+        payload.materialDescription = null;
+        for (const g of PE_GRADE_WEIGHT_FIELDS) {
+          payload[g.key] = f[g.key].trim() === "" ? null : Number(f[g.key]);
+        }
+      } else {
+        payload.materialDescription = f.materialDescription.trim() || null;
+        payload.netWeight = f.netWeight.trim() === "" ? null : Number(f.netWeight);
+        // Clear any stale PE grade weights if the type was changed away from PE.
+        for (const g of PE_GRADE_WEIGHT_FIELDS) {
+          payload[g.key] = null;
+        }
+      }
+
       await inventoryApi.update(ppicIncomingEditRecord.id, payload);
       setPpicIncomingEditRecord(null);
       await loadPpicIncomingRecords(ppicIncomingPage);
@@ -20533,41 +20566,73 @@ const DashboardScreen = ({ navigation }: any) => {
             {ppicIncomingEditForm.materialType === "PE" && (
               <>
                 <Text style={{ fontSize: 14, fontWeight: "800", color: "#17a34a", marginTop: 18, marginBottom: 6 }}>
-                  PE Grade
+                  PE Grade Weights
                 </Text>
-                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-                  {PE_MATERIAL_GRADE_OPTIONS.map((grade) => {
-                    const active = ppicIncomingEditForm.materialDescription === grade;
-                    return (
-                      <TouchableOpacity
-                        key={`inc-edit-grade-${grade}`}
-                        onPress={() =>
-                          setPpicIncomingEditForm((prev) => ({
-                            ...prev,
-                            materialDescription: grade,
-                          }))
-                        }
+                <View
+                  style={{
+                    backgroundColor: "#faf5ff",
+                    borderWidth: 1,
+                    borderColor: "#e9d5ff",
+                    borderRadius: 10,
+                    padding: 10,
+                  }}
+                >
+                  {PE_GRADE_WEIGHT_FIELDS.map((g, idx) => (
+                    <View
+                      key={g.key}
+                      style={{
+                        flexDirection: "row",
+                        alignItems: "center",
+                        marginTop: idx === 0 ? 0 : 10,
+                      }}
+                    >
+                      <Text style={{ fontSize: 13, fontWeight: "700", color: "#7e22ce", width: 100 }}>
+                        {g.grade}
+                      </Text>
+                      <TextInput
                         style={{
-                          paddingHorizontal: 14,
-                          paddingVertical: 8,
-                          borderRadius: 16,
-                          backgroundColor: active ? "#9333ea" : "#fff",
+                          flex: 1,
+                          backgroundColor: "#fff",
                           borderWidth: 1,
-                          borderColor: active ? "#9333ea" : "#d1d5db",
+                          borderColor: "#d1d5db",
+                          borderRadius: 8,
+                          paddingHorizontal: 12,
+                          paddingVertical: 10,
+                          fontSize: 14,
+                          color: "#1f2937",
                         }}
-                      >
-                        <Text
-                          style={{
-                            fontSize: 13,
-                            fontWeight: "600",
-                            color: active ? "#fff" : "#4b5563",
-                          }}
-                        >
-                          {grade}
-                        </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
+                        value={ppicIncomingEditForm[g.key] ?? ""}
+                        onChangeText={(v) =>
+                          setPpicIncomingEditForm((prev) => ({ ...prev, [g.key]: v }))
+                        }
+                        placeholder="Weight (kg)"
+                        placeholderTextColor="#9ca3af"
+                        keyboardType="numeric"
+                      />
+                    </View>
+                  ))}
+
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      justifyContent: "space-between",
+                      marginTop: 12,
+                      paddingTop: 10,
+                      borderTopWidth: 1,
+                      borderTopColor: "#e9d5ff",
+                    }}
+                  >
+                    <Text style={{ fontSize: 13, fontWeight: "800", color: "#1e293b" }}>
+                      Net Weight
+                    </Text>
+                    <Text style={{ fontSize: 13, fontWeight: "800", color: "#17a34a" }}>
+                      {PE_GRADE_WEIGHT_FIELDS.reduce(
+                        (sum, g) => sum + (Number(ppicIncomingEditForm[g.key]) || 0),
+                        0,
+                      ).toFixed(2)}{" "}
+                      kg
+                    </Text>
+                  </View>
                 </View>
               </>
             )}
@@ -20680,15 +20745,17 @@ const DashboardScreen = ({ navigation }: any) => {
             {(
               [
                 { key: "quantity", label: "Quantity", numeric: true },
-                // For PE, materialDescription is set via the PE Grade picker above instead of free text.
+                // For PE, materialDescription + netWeight are set per-grade in the items list above instead.
                 ...(ppicIncomingEditForm.materialType === "PE"
                   ? []
-                  : [{ key: "materialDescription", label: "Material Description" } as const]),
+                  : [
+                      { key: "materialDescription", label: "Material Description" } as const,
+                      { key: "netWeight", label: "Net Weight (kg)", numeric: true } as const,
+                    ]),
                 { key: "supplier", label: "Supplier" },
                 { key: "truckId", label: "Truck ID" },
                 { key: "entryWeight", label: "Entry Weight (kg)", numeric: true },
                 { key: "exitWeight", label: "Exit Weight (kg)", numeric: true },
-                { key: "netWeight", label: "Net Weight (kg)", numeric: true },
                 { key: "deliveryNote", label: "Delivery Note" },
                 { key: "notes", label: "Notes", multiline: true },
               ] as const
