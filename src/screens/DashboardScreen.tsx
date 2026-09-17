@@ -98,6 +98,14 @@ function formatIncomingDateTime(
   return `${dd}/${mm}/${yyyy} ${time}`;
 }
 
+/** Rounds to 2 decimals, but drops the ".00" when the value is a whole number. */
+function formatWeightTrim(value: number | string | null | undefined): string {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "—";
+  const rounded = Math.round(n * 100) / 100;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2);
+}
+
 /**
  * True for extrusion / PE extruder / PET Boretech row.
  * DB seed uses name "Extrusion" + code EXT; some envs use "Extrusion & Packaging".
@@ -7299,7 +7307,7 @@ const DashboardScreen = ({ navigation }: any) => {
                                 )}
                                 <Text style={{ fontSize: 11, color: "#94a3b8" }}>·</Text>
                                 <Text style={{ fontSize: 11, color: "#64748b" }}>
-                                  Net {rec.netWeight ?? "—"} kg
+                                  Net {formatWeightTrim(rec.netWeight)} kg
                                 </Text>
                               </View>
                             </View>
