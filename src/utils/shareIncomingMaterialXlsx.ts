@@ -24,6 +24,10 @@ const COLUMNS = [
   { header: 'Material Type',         key: 'Material Type',         width: 16 },
   { header: 'Quantity',              key: 'Quantity',              width: 16 },
   { header: 'Region',                key: 'Region',                width: 16 },
+  { header: 'PE Super (kg)',         key: 'PE Super (kg)',         width: 14 },
+  { header: 'PE 1 (kg)',             key: 'PE 1 (kg)',             width: 14 },
+  { header: 'EVA Super (kg)',        key: 'EVA Super (kg)',        width: 14 },
+  { header: 'EVA 1 (kg)',            key: 'EVA 1 (kg)',            width: 14 },
   { header: 'Material Description',  key: 'Material Description',  width: 26 },
   { header: 'Entry Weight (kg)',      key: 'Entry Weight (kg)',      width: 18 },
   { header: 'Exit Weight (kg)',       key: 'Exit Weight (kg)',       width: 16 },
@@ -104,6 +108,10 @@ function buildRows(records: RawMaterial[]): Record<string, string | number>[] {
     'Material Type':        r.materialType ?? '',
     'Quantity':             r.quantity ?? '',
     'Region':               r.region ?? '',
+    'PE Super (kg)':        r.peSuperWeight ?? '',
+    'PE 1 (kg)':            r.pe1Weight ?? '',
+    'EVA Super (kg)':       r.evaSuperWeight ?? '',
+    'EVA 1 (kg)':           r.eva1Weight ?? '',
     'Material Description': r.materialDescription ?? '',
     'Entry Weight (kg)':    r.entryWeight ?? '',
     'Exit Weight (kg)':     r.exitWeight ?? '',
@@ -137,7 +145,11 @@ function buildStyledWorksheet(rows: Record<string, string | number>[]) {
         col.key === 'Quantity' ||
         col.key === 'Entry Weight (kg)' ||
         col.key === 'Exit Weight (kg)' ||
-        col.key === 'Net Weight (kg)';
+        col.key === 'Net Weight (kg)' ||
+        col.key === 'PE Super (kg)' ||
+        col.key === 'PE 1 (kg)' ||
+        col.key === 'EVA Super (kg)' ||
+        col.key === 'EVA 1 (kg)';
 
       const cellStyle =
         col.key === 'S.No'
