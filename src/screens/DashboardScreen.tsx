@@ -1456,14 +1456,13 @@ const DashboardScreen = ({ navigation }: any) => {
     if (!ppicIncomingEditRecord) return;
     const f = ppicIncomingEditForm;
     const isPe = f.materialType.trim() === "PE";
+    const peGradeEntered = PE_GRADE_WEIGHT_FIELDS.some(
+      (g) => (f[g.key] ?? "").trim() !== "",
+    );
     const peGradeSum = PE_GRADE_WEIGHT_FIELDS.reduce(
       (sum, g) => sum + (Number(f[g.key]) || 0),
       0,
     );
-    if (isPe && peGradeSum <= 0) {
-      Alert.alert("Error", "Enter at least one PE grade weight.");
-      return;
-    }
     setPpicIncomingSaving(true);
     try {
       const payload: Record<string, any> = {
@@ -1482,11 +1481,16 @@ const DashboardScreen = ({ navigation }: any) => {
       };
 
       if (isPe) {
-        // Net Weight is auto-derived as the sum of the 4 grade weights below.
-        payload.netWeight = peGradeSum;
         payload.materialDescription = null;
-        for (const g of PE_GRADE_WEIGHT_FIELDS) {
-          payload[g.key] = f[g.key].trim() === "" ? null : Number(f[g.key]);
+        if (peGradeEntered) {
+          // At least one grade weight was entered — Net Weight becomes their sum.
+          payload.netWeight = peGradeSum;
+          for (const g of PE_GRADE_WEIGHT_FIELDS) {
+            payload[g.key] = f[g.key].trim() === "" ? null : Number(f[g.key]);
+          }
+        } else {
+          // Old record with no per-grade breakdown yet — leave its existing Net Weight untouched.
+          payload.netWeight = f.netWeight.trim() === "" ? null : Number(f.netWeight);
         }
       } else {
         payload.materialDescription = f.materialDescription.trim() || null;
@@ -20626,10 +20630,18 @@ const DashboardScreen = ({ navigation }: any) => {
                       Net Weight
                     </Text>
                     <Text style={{ fontSize: 13, fontWeight: "800", color: "#17a34a" }}>
-                      {PE_GRADE_WEIGHT_FIELDS.reduce(
-                        (sum, g) => sum + (Number(ppicIncomingEditForm[g.key]) || 0),
-                        0,
-                      ).toFixed(2)}{" "}
+                      {(() => {
+                        const anyEntered = PE_GRADE_WEIGHT_FIELDS.some(
+                          (g) => (ppicIncomingEditForm[g.key] ?? "").trim() !== "",
+                        );
+                        const value = anyEntered
+                          ? PE_GRADE_WEIGHT_FIELDS.reduce(
+                              (sum, g) => sum + (Number(ppicIncomingEditForm[g.key]) || 0),
+                              0,
+                            )
+                          : Number(ppicIncomingEditForm.netWeight) || 0;
+                        return value.toFixed(2);
+                      })()}{" "}
                       kg
                     </Text>
                   </View>
