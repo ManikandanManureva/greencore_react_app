@@ -75,6 +75,10 @@ import { Station, ProductionLog, Shift } from "../types";
  */
 const INCOMING_MATERIAL_TYPE_OPTIONS = ["PC", "PE", "PET"];
 
+/** Jumbo bag tare weight (kg) subtracted from the scale's gross reading to get net material weight. */
+const JUMBO_BAG_TARE_PC_PE_KG = 3;
+const PET_JUMBO_BAG_SIZE_OPTIONS: (2 | 3)[] = [3, 2];
+
 /** PE incoming material: fixed grade rows, each bound to its own weight field on the edit form. */
 const PE_GRADE_WEIGHT_FIELDS = [
   { grade: "PE SUPER", key: "peSuperWeight" },
@@ -847,6 +851,18 @@ const DashboardScreen = ({ navigation }: any) => {
 
   // Photo State
   const [capturedImages, setCapturedImages] = useState<string[]>([]);
+  // The first photo of a batch is the weigh-scale display — OCR'd automatically to fill weightInput.
+  const [weightOcrLoading, setWeightOcrLoading] = useState(false);
+  // Surface the first OCR failure per session (otherwise it fails silently and operators
+  // have no way to tell "not configured on server" apart from "couldn't read this photo").
+  const weightOcrAlertedRef = useRef(false);
+  /**
+   * The scale reads gross weight (material + jumbo bag). weightInput must hold the NET
+   * material weight, so the raw OCR reading is kept separate and the tare is subtracted
+   * below. PC/PE always use a fixed 3kg bag; PET requires the operator to pick 2kg or 3kg.
+   */
+  const [ocrGrossWeightKg, setOcrGrossWeightKg] = useState<number | null>(null);
+  const [petJumboBagSizeKg, setPetJumboBagSizeKg] = useState<2 | 3 | null>(null);
   const [showCameraPreview, setShowCameraPreview] = useState(false);
   const [showPhotoPreview, setShowPhotoPreview] = useState(false);
   const [tempCapturedImage, setTempCapturedImage] = useState<string | null>(
@@ -4008,6 +4024,69 @@ const DashboardScreen = ({ navigation }: any) => {
   };
 
   /**
+   * The first photo of a batch is the weigh-scale display. OCR it server-side (OpenAI vision)
+   * to read the GROSS weight (material + jumbo bag) — operators cannot type a weight manually,
+   * so a failed read means the photo must be retaken. The net-weight useEffect below subtracts
+   * the jumbo bag tare and is what actually fills weightInput.
+   */
+  const runWeightOcr = async (uri: string) => {
+    setWeightOcrLoading(true);
+    try {
+      const formData = new FormData();
+      if (Platform.OS === "web") {
+        const blob = await (await fetch(uri)).blob();
+        formData.append("image", blob, "weight.jpg");
+      } else {
+        formData.append("image", {
+          uri,
+          name: "weight.jpg",
+          type: "image/jpeg",
+        } as any);
+      }
+      const res = await productionApi.ocrWeight(formData);
+      if (res.data?.success && res.data?.weight != null) {
+        setOcrGrossWeightKg(Number(res.data.weight));
+      } else if (!res.data?.success && !weightOcrAlertedRef.current) {
+        weightOcrAlertedRef.current = true;
+        Alert.alert(
+          "Weight auto-read unavailable",
+          res.data?.message ||
+            "Couldn't read the weight from that photo — remove it above and retake. (This won't be shown again this session.)",
+        );
+      }
+    } catch (e: any) {
+      console.error("Weight OCR failed:", e);
+      if (!weightOcrAlertedRef.current) {
+        weightOcrAlertedRef.current = true;
+        const msg =
+          e?.response?.data?.message ||
+          (e?.response?.status === 404
+            ? "Weight auto-read isn't available on the server yet — contact PPIC."
+            : "Couldn't reach the weight auto-read service — remove the photo above and retake.");
+        Alert.alert("Weight auto-read unavailable", `${msg} (This won't be shown again this session.)`);
+      }
+    } finally {
+      setWeightOcrLoading(false);
+    }
+  };
+
+  /**
+   * Net weight = gross scale reading − jumbo bag tare. PC/PE always use a fixed 3kg bag; PET
+   * requires the operator to pick 2kg or 3kg first (mandatory — weightInput stays empty, which
+   * keeps "Generate QR & Print" disabled via the existing weight-validity check, until picked).
+   */
+  useEffect(() => {
+    if (ocrGrossWeightKg == null) return;
+    const tareKg = isPET ? petJumboBagSizeKg : JUMBO_BAG_TARE_PC_PE_KG;
+    if (tareKg == null) {
+      setWeightInput("");
+      return;
+    }
+    const netKg = Math.max(0, ocrGrossWeightKg - tareKg);
+    setWeightInput(filterNumericWeight(netKg.toFixed(2)));
+  }, [ocrGrossWeightKg, petJumboBagSizeKg, isPET]);
+
+  /**
    * Best-effort migration for logs saved before the upload fix: their photo_url still holds
    * local file:// URIs from this device's own capture. If the file still exists in the app's
    * cache on THIS device, upload it and patch the log's photo_url to the new server URL. Files
@@ -4090,7 +4169,10 @@ const DashboardScreen = ({ navigation }: any) => {
           quality: 0.7,
         });
         if (!result.canceled && result.assets?.[0]?.uri) {
-          setCapturedImages((prev) => [...prev, result.assets[0].uri]);
+          const isFirstPhoto = capturedImages.length === 0;
+          const uri = result.assets[0].uri;
+          setCapturedImages((prev) => [...prev, uri]);
+          if (isFirstPhoto) runWeightOcr(uri);
         }
       } catch (e) {
         console.error("Web image pick error:", e);
@@ -4126,9 +4208,12 @@ const DashboardScreen = ({ navigation }: any) => {
 
   const handleAcceptPhoto = () => {
     if (tempCapturedImage) {
-      setCapturedImages((prev) => [...prev, tempCapturedImage]);
+      const isFirstPhoto = capturedImages.length === 0;
+      const uri = tempCapturedImage;
+      setCapturedImages((prev) => [...prev, uri]);
       setShowPhotoPreview(false);
       setTempCapturedImage(null);
+      if (isFirstPhoto) runWeightOcr(uri);
     }
   };
 
@@ -5029,6 +5114,8 @@ const DashboardScreen = ({ navigation }: any) => {
 
         setIsCurrentLogSaved(true); // Mark as saved
         setWeightInput(""); // Clear input field immediately after save
+        setOcrGrossWeightKg(null);
+        setPetJumboBagSizeKg(null);
         setRemarkInput("");
         setCapturedImages([]); // Clear photos after saving
         Alert.alert(t("common.success"), t("messages.productionLogSaved"));
@@ -5044,6 +5131,8 @@ const DashboardScreen = ({ navigation }: any) => {
     setShowPrintPreview(false);
     setIsCurrentLogSaved(false);
     setWeightInput("");
+                            setOcrGrossWeightKg(null);
+                            setPetJumboBagSizeKg(null);
     setRemarkInput("");
     setPreviewBagStatus("pending");
     previewBagStatusRef.current = "pending";
@@ -9275,28 +9364,6 @@ const DashboardScreen = ({ navigation }: any) => {
                                 {peOutputType}
                               </Text>
                             </View>
-                            <View style={styles.inputGroup}>
-                              <Text style={styles.label}>Weight (kg)</Text>
-                              <View style={styles.inputWithIcon}>
-                                <TextInput
-                                  style={[
-                                    styles.input,
-                                    styles.inputWithIconPadding,
-                                    { flex: 1 },
-                                  ]}
-                                  placeholder="Enter weight"
-                                  placeholderTextColor="#999"
-                                  keyboardType="decimal-pad"
-                                  value={weightInput}
-                                  onChangeText={handleWeightInputChange}
-                                />
-                                <TouchableOpacity
-                                  style={styles.iconInsideInput}
-                                >
-                                  <Scale size={20} color="#666" />
-                                </TouchableOpacity>
-                              </View>
-                            </View>
                             <TouchableOpacity
                               style={styles.secondaryButton}
                               onPress={handleTakePhoto}
@@ -9338,6 +9405,84 @@ const DashboardScreen = ({ navigation }: any) => {
                                 ))}
                               </ScrollView>
                             )}
+                            {isPET ? (
+                              <View style={styles.inputGroup}>
+                                <Text style={styles.label}>Jumbo Bag Size</Text>
+                                <View style={{ flexDirection: "row", gap: 8 }}>
+                                  {PET_JUMBO_BAG_SIZE_OPTIONS.map((kg) => {
+                                    const active = petJumboBagSizeKg === kg;
+                                    return (
+                                      <TouchableOpacity
+                                        key={kg}
+                                        onPress={() => setPetJumboBagSizeKg(kg)}
+                                        style={{
+                                          flex: 1,
+                                          paddingVertical: 12,
+                                          borderRadius: 8,
+                                          alignItems: "center",
+                                          backgroundColor: active ? "#17a34a" : "#fff",
+                                          borderWidth: 1,
+                                          borderColor: active ? "#17a34a" : "#d1d5db",
+                                        }}
+                                      >
+                                        <Text style={{ color: active ? "#fff" : "#4b5563", fontWeight: "700" }}>
+                                          {kg} kg
+                                        </Text>
+                                      </TouchableOpacity>
+                                    );
+                                  })}
+                                </View>
+                              </View>
+                            ) : (
+                              <View style={styles.inputGroup}>
+                                <Text style={styles.label}>Jumbo Bag</Text>
+                                <Text style={{ fontSize: 14, color: "#4b5563" }}>3 kg (fixed, auto-deducted)</Text>
+                              </View>
+                            )}
+                            {capturedImages.length > 0 && (
+                            <View style={styles.inputGroup}>
+                              <Text style={styles.label}>Weight (kg)</Text>
+                              {weightOcrLoading ? (
+                                <View style={[styles.input, { flexDirection: "row", alignItems: "center", gap: 8 }]}>
+                                  <ActivityIndicator size="small" color="#666" />
+                                  <Text style={{ color: "#666" }}>Reading weight from photo…</Text>
+                                </View>
+                              ) : weightInput ? (
+                                <View>
+                                  <View style={[styles.inputWithIcon, { backgroundColor: "#F8FAFC" }]}>
+                                    <Text style={[styles.input, { flex: 1 }]}>{weightInput} kg</Text>
+                                    <View style={styles.iconInsideInput}>
+                                      <Scale size={20} color="#666" />
+                                    </View>
+                                  </View>
+                                  {ocrGrossWeightKg != null && (
+                                    <Text style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>
+                                      Gross {ocrGrossWeightKg} kg - Bag {isPET ? petJumboBagSizeKg : JUMBO_BAG_TARE_PC_PE_KG} kg
+                                    </Text>
+                                  )}
+                                </View>
+                              ) : isPET && ocrGrossWeightKg != null && petJumboBagSizeKg == null ? (
+                                <Text style={{ color: "#D97706", fontSize: 13 }}>
+                                  Select Jumbo Bag size above to calculate net weight.
+                                </Text>
+                              ) : (
+                                <Text style={{ color: "#DC2626", fontSize: 13 }}>
+                                  Couldn't read weight from the photo — remove it above and retake.
+                                </Text>
+                              )}
+                            </View>
+                            )}
+                            <View style={styles.inputGroup}>
+                              <Text style={styles.label}>{t("dashboard.remark")}</Text>
+                              <TextInput
+                                style={[styles.input, { minHeight: 60, textAlignVertical: "top" }]}
+                                placeholder={t("dashboard.remarkPlaceholder")}
+                                placeholderTextColor="#999"
+                                value={remarkInput}
+                                onChangeText={setRemarkInput}
+                                multiline
+                              />
+                            </View>
                             <TouchableOpacity
                               style={[
                                 styles.primaryButton,
@@ -9880,28 +10025,6 @@ const DashboardScreen = ({ navigation }: any) => {
                                 </Text>
                               </View>
                             )}
-                            <View style={styles.inputGroup}>
-                              <Text style={styles.label}>Weight (kg)</Text>
-                              <View style={styles.inputWithIcon}>
-                                <TextInput
-                                  style={[
-                                    styles.input,
-                                    styles.inputWithIconPadding,
-                                    { flex: 1 },
-                                  ]}
-                                  placeholder="Enter weight"
-                                  placeholderTextColor="#999"
-                                  keyboardType="decimal-pad"
-                                  value={weightInput}
-                                  onChangeText={handleWeightInputChange}
-                                />
-                                <TouchableOpacity
-                                  style={styles.iconInsideInput}
-                                >
-                                  <Scale size={20} color="#666" />
-                                </TouchableOpacity>
-                              </View>
-                            </View>
                             <TouchableOpacity
                               style={styles.secondaryButton}
                               onPress={handleTakePhoto}
@@ -9943,6 +10066,84 @@ const DashboardScreen = ({ navigation }: any) => {
                                 ))}
                               </ScrollView>
                             )}
+                            {isPET ? (
+                              <View style={styles.inputGroup}>
+                                <Text style={styles.label}>Jumbo Bag Size</Text>
+                                <View style={{ flexDirection: "row", gap: 8 }}>
+                                  {PET_JUMBO_BAG_SIZE_OPTIONS.map((kg) => {
+                                    const active = petJumboBagSizeKg === kg;
+                                    return (
+                                      <TouchableOpacity
+                                        key={kg}
+                                        onPress={() => setPetJumboBagSizeKg(kg)}
+                                        style={{
+                                          flex: 1,
+                                          paddingVertical: 12,
+                                          borderRadius: 8,
+                                          alignItems: "center",
+                                          backgroundColor: active ? "#17a34a" : "#fff",
+                                          borderWidth: 1,
+                                          borderColor: active ? "#17a34a" : "#d1d5db",
+                                        }}
+                                      >
+                                        <Text style={{ color: active ? "#fff" : "#4b5563", fontWeight: "700" }}>
+                                          {kg} kg
+                                        </Text>
+                                      </TouchableOpacity>
+                                    );
+                                  })}
+                                </View>
+                              </View>
+                            ) : (
+                              <View style={styles.inputGroup}>
+                                <Text style={styles.label}>Jumbo Bag</Text>
+                                <Text style={{ fontSize: 14, color: "#4b5563" }}>3 kg (fixed, auto-deducted)</Text>
+                              </View>
+                            )}
+                            {capturedImages.length > 0 && (
+                            <View style={styles.inputGroup}>
+                              <Text style={styles.label}>Weight (kg)</Text>
+                              {weightOcrLoading ? (
+                                <View style={[styles.input, { flexDirection: "row", alignItems: "center", gap: 8 }]}>
+                                  <ActivityIndicator size="small" color="#666" />
+                                  <Text style={{ color: "#666" }}>Reading weight from photo…</Text>
+                                </View>
+                              ) : weightInput ? (
+                                <View>
+                                  <View style={[styles.inputWithIcon, { backgroundColor: "#F8FAFC" }]}>
+                                    <Text style={[styles.input, { flex: 1 }]}>{weightInput} kg</Text>
+                                    <View style={styles.iconInsideInput}>
+                                      <Scale size={20} color="#666" />
+                                    </View>
+                                  </View>
+                                  {ocrGrossWeightKg != null && (
+                                    <Text style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>
+                                      Gross {ocrGrossWeightKg} kg - Bag {isPET ? petJumboBagSizeKg : JUMBO_BAG_TARE_PC_PE_KG} kg
+                                    </Text>
+                                  )}
+                                </View>
+                              ) : isPET && ocrGrossWeightKg != null && petJumboBagSizeKg == null ? (
+                                <Text style={{ color: "#D97706", fontSize: 13 }}>
+                                  Select Jumbo Bag size above to calculate net weight.
+                                </Text>
+                              ) : (
+                                <Text style={{ color: "#DC2626", fontSize: 13 }}>
+                                  Couldn't read weight from the photo — remove it above and retake.
+                                </Text>
+                              )}
+                            </View>
+                            )}
+                            <View style={styles.inputGroup}>
+                              <Text style={styles.label}>{t("dashboard.remark")}</Text>
+                              <TextInput
+                                style={[styles.input, { minHeight: 60, textAlignVertical: "top" }]}
+                                placeholder={t("dashboard.remarkPlaceholder")}
+                                placeholderTextColor="#999"
+                                value={remarkInput}
+                                onChangeText={setRemarkInput}
+                                multiline
+                              />
+                            </View>
                             <TouchableOpacity
                               style={[
                                 styles.primaryButton,
@@ -10011,6 +10212,8 @@ const DashboardScreen = ({ navigation }: any) => {
                           onPress={() => {
                             setSelectedSection(null);
                             setWeightInput("");
+                            setOcrGrossWeightKg(null);
+                            setPetJumboBagSizeKg(null);
                           }}
                         >
                           <Text style={styles.secondaryButtonText}>← Back</Text>
@@ -11490,28 +11693,6 @@ const DashboardScreen = ({ navigation }: any) => {
                               </Text>
                             </View>
 
-                            <View style={styles.inputGroup}>
-                              <Text style={styles.label}>Weight (kg)</Text>
-                              <View style={styles.inputWithIcon}>
-                                <TextInput
-                                  style={[
-                                    styles.input,
-                                    styles.inputWithIconPadding,
-                                    { flex: 1 },
-                                  ]}
-                                  placeholder="Enter weight"
-                                  placeholderTextColor="#999"
-                                  keyboardType="decimal-pad"
-                                  value={weightInput}
-                                  onChangeText={handleWeightInputChange}
-                                />
-                                <TouchableOpacity
-                                  style={styles.iconInsideInput}
-                                >
-                                  <Scale size={20} color="#666" />
-                                </TouchableOpacity>
-                              </View>
-                            </View>
 
                             <TouchableOpacity
                               style={styles.secondaryButton}
@@ -11556,6 +11737,84 @@ const DashboardScreen = ({ navigation }: any) => {
                               </ScrollView>
                             )}
 
+                            {isPET ? (
+                              <View style={styles.inputGroup}>
+                                <Text style={styles.label}>Jumbo Bag Size</Text>
+                                <View style={{ flexDirection: "row", gap: 8 }}>
+                                  {PET_JUMBO_BAG_SIZE_OPTIONS.map((kg) => {
+                                    const active = petJumboBagSizeKg === kg;
+                                    return (
+                                      <TouchableOpacity
+                                        key={kg}
+                                        onPress={() => setPetJumboBagSizeKg(kg)}
+                                        style={{
+                                          flex: 1,
+                                          paddingVertical: 12,
+                                          borderRadius: 8,
+                                          alignItems: "center",
+                                          backgroundColor: active ? "#17a34a" : "#fff",
+                                          borderWidth: 1,
+                                          borderColor: active ? "#17a34a" : "#d1d5db",
+                                        }}
+                                      >
+                                        <Text style={{ color: active ? "#fff" : "#4b5563", fontWeight: "700" }}>
+                                          {kg} kg
+                                        </Text>
+                                      </TouchableOpacity>
+                                    );
+                                  })}
+                                </View>
+                              </View>
+                            ) : (
+                              <View style={styles.inputGroup}>
+                                <Text style={styles.label}>Jumbo Bag</Text>
+                                <Text style={{ fontSize: 14, color: "#4b5563" }}>3 kg (fixed, auto-deducted)</Text>
+                              </View>
+                            )}
+                            {capturedImages.length > 0 && (
+                            <View style={styles.inputGroup}>
+                              <Text style={styles.label}>Weight (kg)</Text>
+                              {weightOcrLoading ? (
+                                <View style={[styles.input, { flexDirection: "row", alignItems: "center", gap: 8 }]}>
+                                  <ActivityIndicator size="small" color="#666" />
+                                  <Text style={{ color: "#666" }}>Reading weight from photo…</Text>
+                                </View>
+                              ) : weightInput ? (
+                                <View>
+                                  <View style={[styles.inputWithIcon, { backgroundColor: "#F8FAFC" }]}>
+                                    <Text style={[styles.input, { flex: 1 }]}>{weightInput} kg</Text>
+                                    <View style={styles.iconInsideInput}>
+                                      <Scale size={20} color="#666" />
+                                    </View>
+                                  </View>
+                                  {ocrGrossWeightKg != null && (
+                                    <Text style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>
+                                      Gross {ocrGrossWeightKg} kg - Bag {isPET ? petJumboBagSizeKg : JUMBO_BAG_TARE_PC_PE_KG} kg
+                                    </Text>
+                                  )}
+                                </View>
+                              ) : isPET && ocrGrossWeightKg != null && petJumboBagSizeKg == null ? (
+                                <Text style={{ color: "#D97706", fontSize: 13 }}>
+                                  Select Jumbo Bag size above to calculate net weight.
+                                </Text>
+                              ) : (
+                                <Text style={{ color: "#DC2626", fontSize: 13 }}>
+                                  Couldn't read weight from the photo — remove it above and retake.
+                                </Text>
+                              )}
+                            </View>
+                            )}
+                            <View style={styles.inputGroup}>
+                              <Text style={styles.label}>{t("dashboard.remark")}</Text>
+                              <TextInput
+                                style={[styles.input, { minHeight: 60, textAlignVertical: "top" }]}
+                                placeholder={t("dashboard.remarkPlaceholder")}
+                                placeholderTextColor="#999"
+                                value={remarkInput}
+                                onChangeText={setRemarkInput}
+                                multiline
+                              />
+                            </View>
                             <TouchableOpacity
                               style={[
                                 styles.primaryButton,
@@ -11750,26 +12009,6 @@ const DashboardScreen = ({ navigation }: any) => {
                           <Text style={styles.sectionTitleText}>Jumbo Bag</Text>
                         </View>
 
-                        <View style={styles.inputGroup}>
-                          <Text style={styles.label}>Weight (kg)</Text>
-                          <View style={styles.inputWithIcon}>
-                            <TextInput
-                              style={[
-                                styles.input,
-                                styles.inputWithIconPadding,
-                                { flex: 1 },
-                              ]}
-                              placeholder="Enter weight"
-                              placeholderTextColor="#999"
-                              keyboardType="decimal-pad"
-                              value={weightInput}
-                              onChangeText={handleWeightInputChange}
-                            />
-                            <TouchableOpacity style={styles.iconInsideInput}>
-                              <Scale size={20} color="#666" />
-                            </TouchableOpacity>
-                          </View>
-                        </View>
 
                         <TouchableOpacity
                           style={styles.secondaryButton}
@@ -11809,6 +12048,84 @@ const DashboardScreen = ({ navigation }: any) => {
                           </ScrollView>
                         )}
 
+                        {isPET ? (
+                          <View style={styles.inputGroup}>
+                            <Text style={styles.label}>Jumbo Bag Size</Text>
+                            <View style={{ flexDirection: "row", gap: 8 }}>
+                              {PET_JUMBO_BAG_SIZE_OPTIONS.map((kg) => {
+                                const active = petJumboBagSizeKg === kg;
+                                return (
+                                  <TouchableOpacity
+                                    key={kg}
+                                    onPress={() => setPetJumboBagSizeKg(kg)}
+                                    style={{
+                                      flex: 1,
+                                      paddingVertical: 12,
+                                      borderRadius: 8,
+                                      alignItems: "center",
+                                      backgroundColor: active ? "#17a34a" : "#fff",
+                                      borderWidth: 1,
+                                      borderColor: active ? "#17a34a" : "#d1d5db",
+                                    }}
+                                  >
+                                    <Text style={{ color: active ? "#fff" : "#4b5563", fontWeight: "700" }}>
+                                      {kg} kg
+                                    </Text>
+                                  </TouchableOpacity>
+                                );
+                              })}
+                            </View>
+                          </View>
+                        ) : (
+                          <View style={styles.inputGroup}>
+                            <Text style={styles.label}>Jumbo Bag</Text>
+                            <Text style={{ fontSize: 14, color: "#4b5563" }}>3 kg (fixed, auto-deducted)</Text>
+                          </View>
+                        )}
+                        {capturedImages.length > 0 && (
+                        <View style={styles.inputGroup}>
+                          <Text style={styles.label}>Weight (kg)</Text>
+                          {weightOcrLoading ? (
+                            <View style={[styles.input, { flexDirection: "row", alignItems: "center", gap: 8 }]}>
+                              <ActivityIndicator size="small" color="#666" />
+                              <Text style={{ color: "#666" }}>Reading weight from photo…</Text>
+                            </View>
+                          ) : weightInput ? (
+                            <View>
+                              <View style={[styles.inputWithIcon, { backgroundColor: "#F8FAFC" }]}>
+                                <Text style={[styles.input, { flex: 1 }]}>{weightInput} kg</Text>
+                                <View style={styles.iconInsideInput}>
+                                  <Scale size={20} color="#666" />
+                                </View>
+                              </View>
+                              {ocrGrossWeightKg != null && (
+                                <Text style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>
+                                  Gross {ocrGrossWeightKg} kg - Bag {isPET ? petJumboBagSizeKg : JUMBO_BAG_TARE_PC_PE_KG} kg
+                                </Text>
+                              )}
+                            </View>
+                          ) : isPET && ocrGrossWeightKg != null && petJumboBagSizeKg == null ? (
+                            <Text style={{ color: "#D97706", fontSize: 13 }}>
+                              Select Jumbo Bag size above to calculate net weight.
+                            </Text>
+                          ) : (
+                            <Text style={{ color: "#DC2626", fontSize: 13 }}>
+                              Couldn't read weight from the photo — remove it above and retake.
+                            </Text>
+                          )}
+                        </View>
+                        )}
+                        <View style={styles.inputGroup}>
+                          <Text style={styles.label}>{t("dashboard.remark")}</Text>
+                          <TextInput
+                            style={[styles.input, { minHeight: 60, textAlignVertical: "top" }]}
+                            placeholder={t("dashboard.remarkPlaceholder")}
+                            placeholderTextColor="#999"
+                            value={remarkInput}
+                            onChangeText={setRemarkInput}
+                            multiline
+                          />
+                        </View>
                         <TouchableOpacity
                           style={[
                             styles.primaryButton,
@@ -13029,26 +13346,6 @@ const DashboardScreen = ({ navigation }: any) => {
                         <Text style={styles.sectionTitleText}>Jumbo Bag</Text>
                       </View>
 
-                      <View style={styles.inputGroup}>
-                        <Text style={styles.label}>Weight (kg)</Text>
-                        <View style={styles.inputWithIcon}>
-                          <TextInput
-                            style={[
-                              styles.input,
-                              styles.inputWithIconPadding,
-                              { flex: 1 },
-                            ]}
-                            placeholder="Enter weight"
-                            placeholderTextColor="#999"
-                            keyboardType="decimal-pad"
-                            value={weightInput}
-                            onChangeText={handleWeightInputChange}
-                          />
-                          <TouchableOpacity style={styles.iconInsideInput}>
-                            <Scale size={20} color="#666" />
-                          </TouchableOpacity>
-                        </View>
-                      </View>
 
                       <TouchableOpacity
                         style={styles.secondaryButton}
@@ -13088,6 +13385,84 @@ const DashboardScreen = ({ navigation }: any) => {
                         </ScrollView>
                       )}
 
+                      {isPET ? (
+                        <View style={styles.inputGroup}>
+                          <Text style={styles.label}>Jumbo Bag Size</Text>
+                          <View style={{ flexDirection: "row", gap: 8 }}>
+                            {PET_JUMBO_BAG_SIZE_OPTIONS.map((kg) => {
+                              const active = petJumboBagSizeKg === kg;
+                              return (
+                                <TouchableOpacity
+                                  key={kg}
+                                  onPress={() => setPetJumboBagSizeKg(kg)}
+                                  style={{
+                                    flex: 1,
+                                    paddingVertical: 12,
+                                    borderRadius: 8,
+                                    alignItems: "center",
+                                    backgroundColor: active ? "#17a34a" : "#fff",
+                                    borderWidth: 1,
+                                    borderColor: active ? "#17a34a" : "#d1d5db",
+                                  }}
+                                >
+                                  <Text style={{ color: active ? "#fff" : "#4b5563", fontWeight: "700" }}>
+                                    {kg} kg
+                                  </Text>
+                                </TouchableOpacity>
+                              );
+                            })}
+                          </View>
+                        </View>
+                      ) : (
+                        <View style={styles.inputGroup}>
+                          <Text style={styles.label}>Jumbo Bag</Text>
+                          <Text style={{ fontSize: 14, color: "#4b5563" }}>3 kg (fixed, auto-deducted)</Text>
+                        </View>
+                      )}
+                      {capturedImages.length > 0 && (
+                      <View style={styles.inputGroup}>
+                        <Text style={styles.label}>Weight (kg)</Text>
+                        {weightOcrLoading ? (
+                          <View style={[styles.input, { flexDirection: "row", alignItems: "center", gap: 8 }]}>
+                            <ActivityIndicator size="small" color="#666" />
+                            <Text style={{ color: "#666" }}>Reading weight from photo…</Text>
+                          </View>
+                        ) : weightInput ? (
+                          <View>
+                            <View style={[styles.inputWithIcon, { backgroundColor: "#F8FAFC" }]}>
+                              <Text style={[styles.input, { flex: 1 }]}>{weightInput} kg</Text>
+                              <View style={styles.iconInsideInput}>
+                                <Scale size={20} color="#666" />
+                              </View>
+                            </View>
+                            {ocrGrossWeightKg != null && (
+                              <Text style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>
+                                Gross {ocrGrossWeightKg} kg - Bag {isPET ? petJumboBagSizeKg : JUMBO_BAG_TARE_PC_PE_KG} kg
+                              </Text>
+                            )}
+                          </View>
+                        ) : isPET && ocrGrossWeightKg != null && petJumboBagSizeKg == null ? (
+                          <Text style={{ color: "#D97706", fontSize: 13 }}>
+                            Select Jumbo Bag size above to calculate net weight.
+                          </Text>
+                        ) : (
+                          <Text style={{ color: "#DC2626", fontSize: 13 }}>
+                            Couldn't read weight from the photo — remove it above and retake.
+                          </Text>
+                        )}
+                      </View>
+                      )}
+                      <View style={styles.inputGroup}>
+                        <Text style={styles.label}>{t("dashboard.remark")}</Text>
+                        <TextInput
+                          style={[styles.input, { minHeight: 60, textAlignVertical: "top" }]}
+                          placeholder={t("dashboard.remarkPlaceholder")}
+                          placeholderTextColor="#999"
+                          value={remarkInput}
+                          onChangeText={setRemarkInput}
+                          multiline
+                        />
+                      </View>
                       <TouchableOpacity
                         style={[
                           styles.primaryButton,
@@ -14811,28 +15186,6 @@ const DashboardScreen = ({ navigation }: any) => {
                                 {selectedSubLine}
                               </Text>
                             </View>
-                            <View style={styles.inputGroup}>
-                              <Text style={styles.label}>Weight (kg)</Text>
-                              <View style={styles.inputWithIcon}>
-                                <TextInput
-                                  style={[
-                                    styles.input,
-                                    styles.inputWithIconPadding,
-                                    { flex: 1 },
-                                  ]}
-                                  placeholder="Enter output weight"
-                                  placeholderTextColor="#999"
-                                  keyboardType="decimal-pad"
-                                  value={weightInput}
-                                  onChangeText={handleWeightInputChange}
-                                />
-                                <TouchableOpacity
-                                  style={styles.iconInsideInput}
-                                >
-                                  <Scale size={20} color="#666" />
-                                </TouchableOpacity>
-                              </View>
-                            </View>
                             <TouchableOpacity
                               style={styles.secondaryButton}
                               onPress={handleTakePhoto}
@@ -14874,6 +15227,84 @@ const DashboardScreen = ({ navigation }: any) => {
                                 ))}
                               </ScrollView>
                             )}
+                            {isPET ? (
+                              <View style={styles.inputGroup}>
+                                <Text style={styles.label}>Jumbo Bag Size</Text>
+                                <View style={{ flexDirection: "row", gap: 8 }}>
+                                  {PET_JUMBO_BAG_SIZE_OPTIONS.map((kg) => {
+                                    const active = petJumboBagSizeKg === kg;
+                                    return (
+                                      <TouchableOpacity
+                                        key={kg}
+                                        onPress={() => setPetJumboBagSizeKg(kg)}
+                                        style={{
+                                          flex: 1,
+                                          paddingVertical: 12,
+                                          borderRadius: 8,
+                                          alignItems: "center",
+                                          backgroundColor: active ? "#17a34a" : "#fff",
+                                          borderWidth: 1,
+                                          borderColor: active ? "#17a34a" : "#d1d5db",
+                                        }}
+                                      >
+                                        <Text style={{ color: active ? "#fff" : "#4b5563", fontWeight: "700" }}>
+                                          {kg} kg
+                                        </Text>
+                                      </TouchableOpacity>
+                                    );
+                                  })}
+                                </View>
+                              </View>
+                            ) : (
+                              <View style={styles.inputGroup}>
+                                <Text style={styles.label}>Jumbo Bag</Text>
+                                <Text style={{ fontSize: 14, color: "#4b5563" }}>3 kg (fixed, auto-deducted)</Text>
+                              </View>
+                            )}
+                            {capturedImages.length > 0 && (
+                            <View style={styles.inputGroup}>
+                              <Text style={styles.label}>Weight (kg)</Text>
+                              {weightOcrLoading ? (
+                                <View style={[styles.input, { flexDirection: "row", alignItems: "center", gap: 8 }]}>
+                                  <ActivityIndicator size="small" color="#666" />
+                                  <Text style={{ color: "#666" }}>Reading weight from photo…</Text>
+                                </View>
+                              ) : weightInput ? (
+                                <View>
+                                  <View style={[styles.inputWithIcon, { backgroundColor: "#F8FAFC" }]}>
+                                    <Text style={[styles.input, { flex: 1 }]}>{weightInput} kg</Text>
+                                    <View style={styles.iconInsideInput}>
+                                      <Scale size={20} color="#666" />
+                                    </View>
+                                  </View>
+                                  {ocrGrossWeightKg != null && (
+                                    <Text style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>
+                                      Gross {ocrGrossWeightKg} kg - Bag {isPET ? petJumboBagSizeKg : JUMBO_BAG_TARE_PC_PE_KG} kg
+                                    </Text>
+                                  )}
+                                </View>
+                              ) : isPET && ocrGrossWeightKg != null && petJumboBagSizeKg == null ? (
+                                <Text style={{ color: "#D97706", fontSize: 13 }}>
+                                  Select Jumbo Bag size above to calculate net weight.
+                                </Text>
+                              ) : (
+                                <Text style={{ color: "#DC2626", fontSize: 13 }}>
+                                  Couldn't read weight from the photo — remove it above and retake.
+                                </Text>
+                              )}
+                            </View>
+                            )}
+                            <View style={styles.inputGroup}>
+                              <Text style={styles.label}>{t("dashboard.remark")}</Text>
+                              <TextInput
+                                style={[styles.input, { minHeight: 60, textAlignVertical: "top" }]}
+                                placeholder={t("dashboard.remarkPlaceholder")}
+                                placeholderTextColor="#999"
+                                value={remarkInput}
+                                onChangeText={setRemarkInput}
+                                multiline
+                              />
+                            </View>
                             <TouchableOpacity
                               style={[
                                 styles.primaryButton,
@@ -15554,26 +15985,6 @@ const DashboardScreen = ({ navigation }: any) => {
                               Jumbo Bag
                             </Text>
                           </View>
-                          <View style={styles.inputGroup}>
-                            <Text style={styles.label}>Weight (kg)</Text>
-                            <View style={styles.inputWithIcon}>
-                              <TextInput
-                                style={[
-                                  styles.input,
-                                  styles.inputWithIconPadding,
-                                  { flex: 1 },
-                                ]}
-                                placeholder="Enter weight"
-                                placeholderTextColor="#999"
-                                keyboardType="decimal-pad"
-                                value={weightInput}
-                                onChangeText={handleWeightInputChange}
-                              />
-                              <TouchableOpacity style={styles.iconInsideInput}>
-                                <Scale size={20} color="#666" />
-                              </TouchableOpacity>
-                            </View>
-                          </View>
                           <TouchableOpacity
                             style={styles.secondaryButton}
                             onPress={handleTakePhoto}
@@ -15615,6 +16026,84 @@ const DashboardScreen = ({ navigation }: any) => {
                               ))}
                             </ScrollView>
                           )}
+                          {isPET ? (
+                            <View style={styles.inputGroup}>
+                              <Text style={styles.label}>Jumbo Bag Size</Text>
+                              <View style={{ flexDirection: "row", gap: 8 }}>
+                                {PET_JUMBO_BAG_SIZE_OPTIONS.map((kg) => {
+                                  const active = petJumboBagSizeKg === kg;
+                                  return (
+                                    <TouchableOpacity
+                                      key={kg}
+                                      onPress={() => setPetJumboBagSizeKg(kg)}
+                                      style={{
+                                        flex: 1,
+                                        paddingVertical: 12,
+                                        borderRadius: 8,
+                                        alignItems: "center",
+                                        backgroundColor: active ? "#17a34a" : "#fff",
+                                        borderWidth: 1,
+                                        borderColor: active ? "#17a34a" : "#d1d5db",
+                                      }}
+                                    >
+                                      <Text style={{ color: active ? "#fff" : "#4b5563", fontWeight: "700" }}>
+                                        {kg} kg
+                                      </Text>
+                                    </TouchableOpacity>
+                                  );
+                                })}
+                              </View>
+                            </View>
+                          ) : (
+                            <View style={styles.inputGroup}>
+                              <Text style={styles.label}>Jumbo Bag</Text>
+                              <Text style={{ fontSize: 14, color: "#4b5563" }}>3 kg (fixed, auto-deducted)</Text>
+                            </View>
+                          )}
+                          {capturedImages.length > 0 && (
+                          <View style={styles.inputGroup}>
+                            <Text style={styles.label}>Weight (kg)</Text>
+                            {weightOcrLoading ? (
+                              <View style={[styles.input, { flexDirection: "row", alignItems: "center", gap: 8 }]}>
+                                <ActivityIndicator size="small" color="#666" />
+                                <Text style={{ color: "#666" }}>Reading weight from photo…</Text>
+                              </View>
+                            ) : weightInput ? (
+                              <View>
+                                <View style={[styles.inputWithIcon, { backgroundColor: "#F8FAFC" }]}>
+                                  <Text style={[styles.input, { flex: 1 }]}>{weightInput} kg</Text>
+                                  <View style={styles.iconInsideInput}>
+                                    <Scale size={20} color="#666" />
+                                  </View>
+                                </View>
+                                {ocrGrossWeightKg != null && (
+                                  <Text style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>
+                                    Gross {ocrGrossWeightKg} kg - Bag {isPET ? petJumboBagSizeKg : JUMBO_BAG_TARE_PC_PE_KG} kg
+                                  </Text>
+                                )}
+                              </View>
+                            ) : isPET && ocrGrossWeightKg != null && petJumboBagSizeKg == null ? (
+                              <Text style={{ color: "#D97706", fontSize: 13 }}>
+                                Select Jumbo Bag size above to calculate net weight.
+                              </Text>
+                            ) : (
+                              <Text style={{ color: "#DC2626", fontSize: 13 }}>
+                                Couldn't read weight from the photo — remove it above and retake.
+                              </Text>
+                            )}
+                          </View>
+                          )}
+                          <View style={styles.inputGroup}>
+                            <Text style={styles.label}>{t("dashboard.remark")}</Text>
+                            <TextInput
+                              style={[styles.input, { minHeight: 60, textAlignVertical: "top" }]}
+                              placeholder={t("dashboard.remarkPlaceholder")}
+                              placeholderTextColor="#999"
+                              value={remarkInput}
+                              onChangeText={setRemarkInput}
+                              multiline
+                            />
+                          </View>
                           <TouchableOpacity
                             style={[
                               styles.primaryButton,
@@ -15699,6 +16188,8 @@ const DashboardScreen = ({ navigation }: any) => {
                           onPress={() => {
                             setSelectedSection(null);
                             setWeightInput("");
+                            setOcrGrossWeightKg(null);
+                            setPetJumboBagSizeKg(null);
                             setCapturedImages([]);
                           }}
                         >
@@ -17173,26 +17664,6 @@ const DashboardScreen = ({ navigation }: any) => {
                         <Text style={styles.sectionTitleText}>Jumbo Bag</Text>
                       </View>
 
-                      <View style={styles.inputGroup}>
-                        <Text style={styles.label}>Weight (kg)</Text>
-                        <View style={styles.inputWithIcon}>
-                          <TextInput
-                            style={[
-                              styles.input,
-                              styles.inputWithIconPadding,
-                              { flex: 1 },
-                            ]}
-                            placeholder="Enter weight"
-                            placeholderTextColor="#999"
-                            keyboardType="decimal-pad"
-                            value={weightInput}
-                            onChangeText={handleWeightInputChange}
-                          />
-                          <TouchableOpacity style={styles.iconInsideInput}>
-                            <Scale size={20} color="#666" />
-                          </TouchableOpacity>
-                        </View>
-                      </View>
 
                       <TouchableOpacity
                         style={styles.secondaryButton}
@@ -17232,6 +17703,84 @@ const DashboardScreen = ({ navigation }: any) => {
                         </ScrollView>
                       )}
 
+                      {isPET ? (
+                        <View style={styles.inputGroup}>
+                          <Text style={styles.label}>Jumbo Bag Size</Text>
+                          <View style={{ flexDirection: "row", gap: 8 }}>
+                            {PET_JUMBO_BAG_SIZE_OPTIONS.map((kg) => {
+                              const active = petJumboBagSizeKg === kg;
+                              return (
+                                <TouchableOpacity
+                                  key={kg}
+                                  onPress={() => setPetJumboBagSizeKg(kg)}
+                                  style={{
+                                    flex: 1,
+                                    paddingVertical: 12,
+                                    borderRadius: 8,
+                                    alignItems: "center",
+                                    backgroundColor: active ? "#17a34a" : "#fff",
+                                    borderWidth: 1,
+                                    borderColor: active ? "#17a34a" : "#d1d5db",
+                                  }}
+                                >
+                                  <Text style={{ color: active ? "#fff" : "#4b5563", fontWeight: "700" }}>
+                                    {kg} kg
+                                  </Text>
+                                </TouchableOpacity>
+                              );
+                            })}
+                          </View>
+                        </View>
+                      ) : (
+                        <View style={styles.inputGroup}>
+                          <Text style={styles.label}>Jumbo Bag</Text>
+                          <Text style={{ fontSize: 14, color: "#4b5563" }}>3 kg (fixed, auto-deducted)</Text>
+                        </View>
+                      )}
+                      {capturedImages.length > 0 && (
+                      <View style={styles.inputGroup}>
+                        <Text style={styles.label}>Weight (kg)</Text>
+                        {weightOcrLoading ? (
+                          <View style={[styles.input, { flexDirection: "row", alignItems: "center", gap: 8 }]}>
+                            <ActivityIndicator size="small" color="#666" />
+                            <Text style={{ color: "#666" }}>Reading weight from photo…</Text>
+                          </View>
+                        ) : weightInput ? (
+                          <View>
+                            <View style={[styles.inputWithIcon, { backgroundColor: "#F8FAFC" }]}>
+                              <Text style={[styles.input, { flex: 1 }]}>{weightInput} kg</Text>
+                              <View style={styles.iconInsideInput}>
+                                <Scale size={20} color="#666" />
+                              </View>
+                            </View>
+                            {ocrGrossWeightKg != null && (
+                              <Text style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>
+                                Gross {ocrGrossWeightKg} kg - Bag {isPET ? petJumboBagSizeKg : JUMBO_BAG_TARE_PC_PE_KG} kg
+                              </Text>
+                            )}
+                          </View>
+                        ) : isPET && ocrGrossWeightKg != null && petJumboBagSizeKg == null ? (
+                          <Text style={{ color: "#D97706", fontSize: 13 }}>
+                            Select Jumbo Bag size above to calculate net weight.
+                          </Text>
+                        ) : (
+                          <Text style={{ color: "#DC2626", fontSize: 13 }}>
+                            Couldn't read weight from the photo — remove it above and retake.
+                          </Text>
+                        )}
+                      </View>
+                      )}
+                      <View style={styles.inputGroup}>
+                        <Text style={styles.label}>{t("dashboard.remark")}</Text>
+                        <TextInput
+                          style={[styles.input, { minHeight: 60, textAlignVertical: "top" }]}
+                          placeholder={t("dashboard.remarkPlaceholder")}
+                          placeholderTextColor="#999"
+                          value={remarkInput}
+                          onChangeText={setRemarkInput}
+                          multiline
+                        />
+                      </View>
                       <TouchableOpacity
                         style={[
                           styles.primaryButton,
@@ -17628,6 +18177,8 @@ const DashboardScreen = ({ navigation }: any) => {
                             style={styles.selectionCard}
                             onPress={() => {
                               setWeightInput("");
+                            setOcrGrossWeightKg(null);
+                            setPetJumboBagSizeKg(null);
                               setCapturedImages([]);
                               setSelectedSection("output");
                             }}
@@ -17968,26 +18519,6 @@ const DashboardScreen = ({ navigation }: any) => {
                               Jumbo Bag
                             </Text>
                           </View>
-                          <View style={styles.inputGroup}>
-                            <Text style={styles.label}>Weight (kg)</Text>
-                            <View style={styles.inputWithIcon}>
-                              <TextInput
-                                style={[
-                                  styles.input,
-                                  styles.inputWithIconPadding,
-                                  { flex: 1 },
-                                ]}
-                                placeholder="Enter weight"
-                                placeholderTextColor="#999"
-                                keyboardType="decimal-pad"
-                                value={weightInput}
-                                onChangeText={handleWeightInputChange}
-                              />
-                              <TouchableOpacity style={styles.iconInsideInput}>
-                                <Scale size={20} color="#666" />
-                              </TouchableOpacity>
-                            </View>
-                          </View>
                           <TouchableOpacity
                             style={styles.secondaryButton}
                             onPress={handleTakePhoto}
@@ -18030,6 +18561,84 @@ const DashboardScreen = ({ navigation }: any) => {
                               ))}
                             </ScrollView>
                           )}
+                          {isPET ? (
+                            <View style={styles.inputGroup}>
+                              <Text style={styles.label}>Jumbo Bag Size</Text>
+                              <View style={{ flexDirection: "row", gap: 8 }}>
+                                {PET_JUMBO_BAG_SIZE_OPTIONS.map((kg) => {
+                                  const active = petJumboBagSizeKg === kg;
+                                  return (
+                                    <TouchableOpacity
+                                      key={kg}
+                                      onPress={() => setPetJumboBagSizeKg(kg)}
+                                      style={{
+                                        flex: 1,
+                                        paddingVertical: 12,
+                                        borderRadius: 8,
+                                        alignItems: "center",
+                                        backgroundColor: active ? "#17a34a" : "#fff",
+                                        borderWidth: 1,
+                                        borderColor: active ? "#17a34a" : "#d1d5db",
+                                      }}
+                                    >
+                                      <Text style={{ color: active ? "#fff" : "#4b5563", fontWeight: "700" }}>
+                                        {kg} kg
+                                      </Text>
+                                    </TouchableOpacity>
+                                  );
+                                })}
+                              </View>
+                            </View>
+                          ) : (
+                            <View style={styles.inputGroup}>
+                              <Text style={styles.label}>Jumbo Bag</Text>
+                              <Text style={{ fontSize: 14, color: "#4b5563" }}>3 kg (fixed, auto-deducted)</Text>
+                            </View>
+                          )}
+                          {capturedImages.length > 0 && (
+                          <View style={styles.inputGroup}>
+                            <Text style={styles.label}>Weight (kg)</Text>
+                            {weightOcrLoading ? (
+                              <View style={[styles.input, { flexDirection: "row", alignItems: "center", gap: 8 }]}>
+                                <ActivityIndicator size="small" color="#666" />
+                                <Text style={{ color: "#666" }}>Reading weight from photo…</Text>
+                              </View>
+                            ) : weightInput ? (
+                              <View>
+                                <View style={[styles.inputWithIcon, { backgroundColor: "#F8FAFC" }]}>
+                                  <Text style={[styles.input, { flex: 1 }]}>{weightInput} kg</Text>
+                                  <View style={styles.iconInsideInput}>
+                                    <Scale size={20} color="#666" />
+                                  </View>
+                                </View>
+                                {ocrGrossWeightKg != null && (
+                                  <Text style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>
+                                    Gross {ocrGrossWeightKg} kg - Bag {isPET ? petJumboBagSizeKg : JUMBO_BAG_TARE_PC_PE_KG} kg
+                                  </Text>
+                                )}
+                              </View>
+                            ) : isPET && ocrGrossWeightKg != null && petJumboBagSizeKg == null ? (
+                              <Text style={{ color: "#D97706", fontSize: 13 }}>
+                                Select Jumbo Bag size above to calculate net weight.
+                              </Text>
+                            ) : (
+                              <Text style={{ color: "#DC2626", fontSize: 13 }}>
+                                Couldn't read weight from the photo — remove it above and retake.
+                              </Text>
+                            )}
+                          </View>
+                          )}
+                          <View style={styles.inputGroup}>
+                            <Text style={styles.label}>{t("dashboard.remark")}</Text>
+                            <TextInput
+                              style={[styles.input, { minHeight: 60, textAlignVertical: "top" }]}
+                              placeholder={t("dashboard.remarkPlaceholder")}
+                              placeholderTextColor="#999"
+                              value={remarkInput}
+                              onChangeText={setRemarkInput}
+                              multiline
+                            />
+                          </View>
                           <TouchableOpacity
                             style={[
                               styles.primaryButton,
@@ -18114,6 +18723,8 @@ const DashboardScreen = ({ navigation }: any) => {
                           onPress={() => {
                             setSelectedSection(null);
                             setWeightInput("");
+                            setOcrGrossWeightKg(null);
+                            setPetJumboBagSizeKg(null);
                             setCapturedImages([]);
                           }}
                           accessibilityLabel="Back to select action"
@@ -18640,6 +19251,8 @@ const DashboardScreen = ({ navigation }: any) => {
                             style={styles.selectionCard}
                             onPress={() => {
                               setWeightInput("");
+                            setOcrGrossWeightKg(null);
+                            setPetJumboBagSizeKg(null);
                               setCapturedImages([]);
                               setSelectedSection("output");
                             }}
@@ -18986,26 +19599,6 @@ const DashboardScreen = ({ navigation }: any) => {
                               Jumbo Bag
                             </Text>
                           </View>
-                          <View style={styles.inputGroup}>
-                            <Text style={styles.label}>Weight (kg)</Text>
-                            <View style={styles.inputWithIcon}>
-                              <TextInput
-                                style={[
-                                  styles.input,
-                                  styles.inputWithIconPadding,
-                                  { flex: 1 },
-                                ]}
-                                placeholder="Enter weight"
-                                placeholderTextColor="#999"
-                                keyboardType="decimal-pad"
-                                value={weightInput}
-                                onChangeText={handleWeightInputChange}
-                              />
-                              <TouchableOpacity style={styles.iconInsideInput}>
-                                <Scale size={20} color="#666" />
-                              </TouchableOpacity>
-                            </View>
-                          </View>
                           <TouchableOpacity
                             style={styles.secondaryButton}
                             onPress={handleTakePhoto}
@@ -19047,6 +19640,84 @@ const DashboardScreen = ({ navigation }: any) => {
                               ))}
                             </ScrollView>
                           )}
+                          {isPET ? (
+                            <View style={styles.inputGroup}>
+                              <Text style={styles.label}>Jumbo Bag Size</Text>
+                              <View style={{ flexDirection: "row", gap: 8 }}>
+                                {PET_JUMBO_BAG_SIZE_OPTIONS.map((kg) => {
+                                  const active = petJumboBagSizeKg === kg;
+                                  return (
+                                    <TouchableOpacity
+                                      key={kg}
+                                      onPress={() => setPetJumboBagSizeKg(kg)}
+                                      style={{
+                                        flex: 1,
+                                        paddingVertical: 12,
+                                        borderRadius: 8,
+                                        alignItems: "center",
+                                        backgroundColor: active ? "#17a34a" : "#fff",
+                                        borderWidth: 1,
+                                        borderColor: active ? "#17a34a" : "#d1d5db",
+                                      }}
+                                    >
+                                      <Text style={{ color: active ? "#fff" : "#4b5563", fontWeight: "700" }}>
+                                        {kg} kg
+                                      </Text>
+                                    </TouchableOpacity>
+                                  );
+                                })}
+                              </View>
+                            </View>
+                          ) : (
+                            <View style={styles.inputGroup}>
+                              <Text style={styles.label}>Jumbo Bag</Text>
+                              <Text style={{ fontSize: 14, color: "#4b5563" }}>3 kg (fixed, auto-deducted)</Text>
+                            </View>
+                          )}
+                          {capturedImages.length > 0 && (
+                          <View style={styles.inputGroup}>
+                            <Text style={styles.label}>Weight (kg)</Text>
+                            {weightOcrLoading ? (
+                              <View style={[styles.input, { flexDirection: "row", alignItems: "center", gap: 8 }]}>
+                                <ActivityIndicator size="small" color="#666" />
+                                <Text style={{ color: "#666" }}>Reading weight from photo…</Text>
+                              </View>
+                            ) : weightInput ? (
+                              <View>
+                                <View style={[styles.inputWithIcon, { backgroundColor: "#F8FAFC" }]}>
+                                  <Text style={[styles.input, { flex: 1 }]}>{weightInput} kg</Text>
+                                  <View style={styles.iconInsideInput}>
+                                    <Scale size={20} color="#666" />
+                                  </View>
+                                </View>
+                                {ocrGrossWeightKg != null && (
+                                  <Text style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>
+                                    Gross {ocrGrossWeightKg} kg - Bag {isPET ? petJumboBagSizeKg : JUMBO_BAG_TARE_PC_PE_KG} kg
+                                  </Text>
+                                )}
+                              </View>
+                            ) : isPET && ocrGrossWeightKg != null && petJumboBagSizeKg == null ? (
+                              <Text style={{ color: "#D97706", fontSize: 13 }}>
+                                Select Jumbo Bag size above to calculate net weight.
+                              </Text>
+                            ) : (
+                              <Text style={{ color: "#DC2626", fontSize: 13 }}>
+                                Couldn't read weight from the photo — remove it above and retake.
+                              </Text>
+                            )}
+                          </View>
+                          )}
+                          <View style={styles.inputGroup}>
+                            <Text style={styles.label}>{t("dashboard.remark")}</Text>
+                            <TextInput
+                              style={[styles.input, { minHeight: 60, textAlignVertical: "top" }]}
+                              placeholder={t("dashboard.remarkPlaceholder")}
+                              placeholderTextColor="#999"
+                              value={remarkInput}
+                              onChangeText={setRemarkInput}
+                              multiline
+                            />
+                          </View>
                           <TouchableOpacity
                             style={[
                               styles.primaryButton,
@@ -19131,6 +19802,8 @@ const DashboardScreen = ({ navigation }: any) => {
                           onPress={() => {
                             setSelectedSection(null);
                             setWeightInput("");
+                            setOcrGrossWeightKg(null);
+                            setPetJumboBagSizeKg(null);
                             setCapturedImages([]);
                           }}
                         >

@@ -35,6 +35,18 @@ client.interceptors.request.use(async (config) => {
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
+  // The client defaults to Content-Type: application/json above. Passing `headers: undefined`
+  // on a per-call config does NOT remove that default — axios keeps it, then JSON-serializes
+  // the FormData body into an empty "{}" instead of sending it as multipart. Strip the default
+  // here (but only the default — leave an explicitly-set Content-Type, e.g. native's
+  // 'multipart/form-data' hint, untouched) so the browser can set its own boundary.
+  if (
+    typeof FormData !== 'undefined' &&
+    config.data instanceof FormData &&
+    config.headers['Content-Type'] === 'application/json'
+  ) {
+    delete config.headers['Content-Type'];
+  }
   return config;
 });
 export default client;

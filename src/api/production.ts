@@ -15,6 +15,17 @@ export const productionApi = {
           ? undefined
           : { 'Content-Type': 'multipart/form-data' },
     }),
+  /**
+   * Reads the weight off a scale-display photo via server-side OCR; returns
+   * { success, weight: number | null, raw: string }. The image isn't stored anywhere.
+   */
+  ocrWeight: (formData: FormData) =>
+    client.post('/production/ocr-weight', formData, {
+      headers:
+        Platform.OS === 'web'
+          ? undefined
+          : { 'Content-Type': 'multipart/form-data' },
+    }),
   getStations: () => client.get('/production/stations'),
   getMaterials: () => client.get('/production/materials'),
   startShift: (shiftTypeId: number) =>
