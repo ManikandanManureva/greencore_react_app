@@ -86,6 +86,7 @@ export const productionApi = {
     remark?: string;
     shiftTypeId?: number;
     dnNo?: string;   // Crusher: Delivery Note number, maps to all outputs until updated
+    petBatchNo?: string; // PET: region batch (GPET/YYMMDD/REGION/##) active when the bag was produced
     [key: string]: any;
   }) =>
     client.post('/production/log', data),

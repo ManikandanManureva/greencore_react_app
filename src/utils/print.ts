@@ -7,8 +7,52 @@ import {
   BLEPrinter,
 } from 'react-native-thermal-receipt-printer';
 import { t } from './i18n';
+import { LABEL_LOGO_BASE64 } from './labelLogo';
 
 const PRINTER_STORAGE_KEY = 'selected_printer';
+
+// Document control block of the PET label form (GRI.F.PD-31) — update here when the form is revised.
+const PET_LABEL_DOC_NO = 'GRI.F.PD-31';
+const PET_LABEL_REV_NO = '00';
+const PET_LABEL_EFFECTIVE_DATE = '03.09.2026';
+
+const PET_LABEL_TITLES: Record<string, string> = {
+  crushing: 'CRUSHER',
+  washing: 'WASHING',
+  flakes_sorting: 'FLAKES SORTING',
+  extrusion: 'EXTRUDER',
+};
+
+const escHtml = (s: unknown) =>
+  String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+async function printLabelHtml(html: string): Promise<boolean> {
+  try {
+    const savedPrinter = await printService.getSavedPrinter();
+    if (Platform.OS === 'ios') {
+      await Print.printAsync({ html, printerUrl: savedPrinter?.url });
+    } else {
+      // Android uses the system print dialog, which handles WiFi and saved Bluetooth printers.
+      await Print.printAsync({ html });
+    }
+    return true;
+  } catch (error) {
+    console.error('Print error:', error);
+    // Fallback: if printing fails, offer to share as PDF
+    try {
+      const { uri } = await Print.printToFileAsync({ html });
+      await Sharing.shareAsync(uri, { UTI: '.pdf', mimeType: 'application/pdf' });
+      return true;
+    } catch (shareError) {
+      console.error('Sharing fallback error:', shareError);
+      return false;
+    }
+  }
+}
 
 export const printService = {
   // Discover and select a printer
@@ -296,33 +340,106 @@ export const printService = {
       </html>
     `;
 
-    try {
-      const savedPrinter = await printService.getSavedPrinter();
+    return printLabelHtml(html);
+  },
 
-      if (Platform.OS === 'ios') {
-        // On iOS we can use a specific printer if selected
-        await Print.printAsync({
-          html,
-          printerUrl: savedPrinter?.url
-        });
-      } else {
-        // On Android, we always use the system print dialog which handles 
-        // both WiFi and saved Bluetooth printers via System Print Services.
-        await Print.printAsync({ html });
-      }
-      return true;
-    } catch (error) {
-      console.error('Print error:', error);
-      // Fallback: if printing fails, offer to share as PDF
-      try {
-        const { uri } = await Print.printToFileAsync({ html });
-        await Sharing.shareAsync(uri, { UTI: '.pdf', mimeType: 'application/pdf' });
-        return true;
-      } catch (shareError) {
-        console.error('Sharing fallback error:', shareError);
-        return false;
-      }
-    }
+  /**
+   * PET jumbo-bag label — the GRI.F.PD-31 form layout (logo / title / doc control, Quantity,
+   * QC Passed, BATCH NUMBER = region batch GPET/..., BAG NUMBER = monthly running number) plus
+   * the bag QR. Same 100mm x 150mm stock as printQRLabel so no printer setup changes.
+   */
+  printPetLabel: async (data: any) => {
+    const title =
+      PET_LABEL_TITLES[data.petStationKey] ||
+      (data.line === 'Final PET' ? 'FINAL PACKING' : String(data.station || '').toUpperCase());
+    // Two fixed lines, split after the date (GPET/261014/ | JB/01), so the batch never wraps mid-region.
+    const batchHtml = data.petBatchNo
+      ? escHtml(data.petBatchNo).replace(/^([^/]+\/\d{6}\/)/, '$1<br />')
+      : '&nbsp;';
+    // Same rule as Incoming Material net weight: whole numbers without decimals, otherwise 2 places.
+    const qtyNum = Number(data.weight);
+    const qtyText = Number.isFinite(qtyNum)
+      ? Number.isInteger(qtyNum) ? String(qtyNum) : qtyNum.toFixed(2)
+      : String(data.weight ?? '');
+    const bagNumber = String(data.bagNumber || '');
+    const bagFontPt = bagNumber.length <= 4 ? 28 : bagNumber.length <= 6 ? 20 : 15;
+    const html = `
+      <html>
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=100mm, height=150mm, initial-scale=1" />
+          <style>
+            * { box-sizing: border-box; }
+            @page { size: 100mm 150mm; margin: 0; }
+            html, body {
+              width: 100mm; height: 150mm; margin: 0; padding: 0; overflow: hidden;
+              font-family: Arial, Helvetica, sans-serif; color: #000;
+              -webkit-print-color-adjust: exact; print-color-adjust: exact;
+            }
+            .label {
+              width: 96mm; height: 146mm; margin: 2mm; border: 1.4px solid #000;
+              display: flex; flex-direction: column;
+            }
+            table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+            td { border: 1px solid #000; padding: 1mm 1.4mm; vertical-align: middle; }
+            .logo { width: 16mm; text-align: center; padding: 1mm; }
+            .logo img { width: 14mm; display: block; margin: 0 auto; }
+            .title { text-align: center; font-weight: bold; font-size: 10pt; line-height: 1.25; }
+            .company { text-align: center; font-weight: bold; font-size: 6.2pt; }
+            .doc { width: 33mm; font-size: 6.2pt; line-height: 1.55; padding: 0.6mm 1.2mm; }
+            .doc .k { display: inline-block; width: 15mm; }
+            .doc .blank { display: inline-block; width: 12mm; border-bottom: 0.8px solid #000; }
+            .lbl { text-align: center; font-weight: bold; font-size: 7pt; }
+            .qty { font-size: 7pt; }
+            .qtyval { text-align: center; font-weight: bold; font-size: 9pt; }
+            .qc { height: 18mm; font-size: 7pt; vertical-align: top; }
+            .batchval { text-align: center; font-weight: bold; font-size: 12pt; line-height: 1.3; overflow-wrap: anywhere; }
+            /* Plain bold, not 900: Windows Chrome swaps in the much wider Arial Black at 900. */
+            .bagval { text-align: center; font-weight: bold; white-space: nowrap; }
+            .qr { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+            .qr img { width: 62mm; height: 62mm; object-fit: contain; }
+            .qrtext { font-size: 9pt; font-weight: bold; margin-top: 1.5mm; letter-spacing: 0.3px; }
+            .foot { font-size: 7pt; margin-top: 1mm; }
+          </style>
+        </head>
+        <body>
+          <div class="label">
+            <table>
+              <tr>
+                <td class="logo" rowspan="2"><img src="data:image/jpeg;base64,${LABEL_LOGO_BASE64}" alt="" /></td>
+                <td class="title">LABEL BATCH NUMBER<br />${escHtml(title)}</td>
+                <td class="doc" rowspan="2">
+                  <div><span class="k">Doc No.</span>: ${PET_LABEL_DOC_NO}</div>
+                  <div><span class="k">Rev No.</span>: ${PET_LABEL_REV_NO}</div>
+                  <div><span class="k">Effective Date</span>: ${PET_LABEL_EFFECTIVE_DATE}</div>
+                  <div><span class="k">Name</span>: <span class="blank"></span></div>
+                </td>
+              </tr>
+              <tr><td class="company">PT. GREENCORE RESOURCES INDONESIA</td></tr>
+            </table>
+            <table>
+              <tr>
+                <td class="qty" style="width: 13mm;">Quantity</td>
+                <td class="qtyval" style="width: 20mm;">${escHtml(qtyText)} Kg</td>
+                <td class="lbl">BATCH NUMBER</td>
+                <td class="lbl" style="width: 29mm;">BAG NUMBER</td>
+              </tr>
+              <tr>
+                <td class="qc" colspan="2">QC Passed</td>
+                <td class="batchval">${batchHtml}</td>
+                <td class="bagval" style="font-size: ${bagFontPt}pt;">${escHtml(bagNumber)}</td>
+              </tr>
+            </table>
+            <div class="qr">
+              ${data.qrImage ? `<img src="data:image/png;base64,${data.qrImage}" alt="QR" />` : ''}
+              <div class="qrtext">${escHtml(data.qrCode || '')}</div>
+              <div class="foot">${escHtml(data.date || '')}</div>
+            </div>
+          </div>
+        </body>
+      </html>
+    `;
+    return printLabelHtml(html);
   },
 
   printShiftSummary: async (data: any) => {
