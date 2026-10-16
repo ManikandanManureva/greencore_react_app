@@ -41,7 +41,6 @@ import {
   Pencil,
   Download,
   PauseCircle,
-  ScanLine,
 } from "lucide-react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { productionLineTitleKeyFromRole } from "../utils/productionLine";
@@ -271,9 +270,6 @@ import * as ImagePicker from "expo-image-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import QRCode from "react-native-qrcode-svg";
 import StationDatePicker from "../components/StationDatePicker";
-import PetBatchBar from "../components/PetBatchBar";
-import PetTraceModal, { bagNumberFromQr } from "../components/PetTraceModal";
-import { petBatchesApi, type PetStationKey } from "../api/petbatches";
 
 import { printService } from "../utils/print";
 import { t } from "../utils/i18n";
@@ -689,28 +685,6 @@ const DashboardScreen = ({ navigation }: any) => {
   >(null);
   /** PE only: selected output type (e.g. 'Flakes PE SUPER') for Crusher-Washing station */
   const [peOutputType, setPeOutputType] = useState<string | null>(null);
-  /** PET traceability: batch_no started at this operator's current station (tagged on each bag). */
-  const [activePetBatchNo, setActivePetBatchNo] = useState<string | null>(null);
-  const [showPetTrace, setShowPetTrace] = useState(false);
-  /**
-   * Which of the 4 batch-tracked PET stations is open. Boretech is the Extrusion station with
-   * sub-line 'Flakes PET' (= Flakes Sorting); Starlinger is the synthetic 'Pellet PET' row
-   * (= Extrusion). Final Packing isn't batch-tracked — its bags inherit the batch via lineage.
-   */
-  const currentPetStationKey: PetStationKey | null = (() => {
-    if (!isPET || !selectedStation) return null;
-    const name = (selectedStation.name || "").toLowerCase();
-    const code = String((selectedStation as any).code || "").toUpperCase();
-    if (isPetStarlingerLine(selectedStation) || selectedSubLine === "Pellet PET") return "extrusion";
-    if (isExtrusionPackagingStation(selectedStation) || selectedSubLine === "Flakes PET") return "flakes_sorting";
-    if (isPetFinalPackingLine(selectedStation)) return null;
-    if (name.includes("crush") || code === "CRS") return "crushing";
-    if (name.includes("wash") || code === "WSH") return "washing";
-    return null;
-  })();
-  useEffect(() => {
-    if (!currentPetStationKey) setActivePetBatchNo(null);
-  }, [currentPetStationKey]);
   /** PE Crusher-Washing: search and filter for raw material list */
   const [peRawMaterialSearch, setPeRawMaterialSearch] = useState("");
   const [peRawMaterialFilter, setPeRawMaterialFilter] = useState<
@@ -4873,11 +4847,6 @@ const DashboardScreen = ({ navigation }: any) => {
       Alert.alert("Shift Ended", "Cannot add output after shift has ended.");
       return;
     }
-    // PET traceability: every bag at the 4 batch-tracked stations must belong to a running batch.
-    if (currentPetStationKey && !activePetBatchNo) {
-      Alert.alert(t("petBatch.mustStartTitle"), t("petBatch.mustStartMsg"));
-      return;
-    }
     try {
       setIsLoading(true);
       setIsCurrentLogSaved(false);
@@ -4987,16 +4956,6 @@ const DashboardScreen = ({ navigation }: any) => {
           line: lineDisplay,
           date: new Date().toLocaleDateString(),
           bagStatus: initialBagStatus,
-          // PET label + save: captured now so ending the batch mid-preview can't untag this bag.
-          // Final Packing has no batch session — it inherits the input bag's batch.
-          ...(isPET
-            ? {
-                isPet: true,
-                petStationKey: currentPetStationKey,
-                petBatchNo: activePetBatchNo || selectedInputBag?.pet_batch_no || null,
-                bagNumber: bagNumberFromQr(String(qrCode).trim()),
-              }
-            : {}),
         });
         setPreviewBagStatus(initialBagStatus);
         previewBagStatusRef.current = initialBagStatus;
@@ -5069,7 +5028,6 @@ const DashboardScreen = ({ navigation }: any) => {
         remark: remarkInput.trim() || undefined,
         shiftTypeId: selectedShift?.id,
         ...(isCrusherStn && crusherDnNo ? { dnNo: crusherDnNo } : {}),
-        ...(previewData.petBatchNo ? { petBatchNo: previewData.petBatchNo } : {}),
       };
       const response = await productionApi.logProduction(payload);
       if (response.data.success) {
@@ -5315,9 +5273,7 @@ const DashboardScreen = ({ navigation }: any) => {
         });
       }
       const printData = { ...previewData, qrImage: qrBase64 };
-      const success = previewData.isPet
-        ? await printService.printPetLabel(printData)
-        : await printService.printQRLabel(printData);
+      const success = await printService.printQRLabel(printData);
       if (success) {
         setShowPrintPreview(false);
         setSelectedStation(null);
@@ -5361,43 +5317,7 @@ const DashboardScreen = ({ navigation }: any) => {
         date: new Date(selectedLogForPrint.created_at).toLocaleDateString(),
         qrImage: qrBase64,
       };
-      const isPetLog =
-        String(selectedLogForPrint.material_type_name || "").toUpperCase() === "PET" ||
-        /-PET-/.test(String(selectedLogForPrint.output_bag_qr || ""));
-      let success: boolean;
-      if (isPetLog) {
-        const sub = printData.line;
-        const petStationKey: PetStationKey | null =
-          sub === "Pellet PET"
-            ? "extrusion"
-            : sub === "Flakes PET"
-              ? "flakes_sorting"
-              : sub === "Final PET"
-                ? null
-                : /wash/i.test(stationDisplay)
-                  ? "washing"
-                  : /crush/i.test(stationDisplay)
-                    ? "crushing"
-                    : null;
-        let petBatchNo: string | null = selectedLogForPrint.pet_batch_no || null;
-        if (!petBatchNo) {
-          // e.g. Final Packing bags — inherit the batch from their input bag's lineage.
-          try {
-            const trace = await petBatchesApi.trace(selectedLogForPrint.output_bag_qr);
-            petBatchNo = trace.data?.data?.batch?.batch_no || null;
-          } catch {
-            petBatchNo = null;
-          }
-        }
-        success = await printService.printPetLabel({
-          ...printData,
-          petStationKey,
-          petBatchNo,
-          bagNumber: bagNumberFromQr(selectedLogForPrint.output_bag_qr),
-        });
-      } else {
-        success = await printService.printQRLabel(printData);
-      }
+      const success = await printService.printQRLabel(printData);
       if (success) {
         setShowListPrintPreview(false);
         setSelectedLogForPrint(null);
@@ -5940,25 +5860,11 @@ const DashboardScreen = ({ navigation }: any) => {
               />
             </TouchableOpacity>
           )}
-          {(isPET || isPPIC) && (
-            <TouchableOpacity
-              onPress={() => setShowPetTrace(true)}
-              style={styles.headerExportButton}
-              accessibilityLabel={t("petBatch.scanTitle")}
-            >
-              <ScanLine color="#0ea5e9" size={22} />
-            </TouchableOpacity>
-          )}
           <TouchableOpacity onPress={logout} style={styles.logoutButton}>
             <LogOut color="#EB445A" size={24} />
           </TouchableOpacity>
         </View>
       </View>
-
-      {currentPetStationKey && (
-        <PetBatchBar station={currentPetStationKey} onActiveBatchChange={setActivePetBatchNo} />
-      )}
-      <PetTraceModal visible={showPetTrace} onClose={() => setShowPetTrace(false)} />
 
       <ScrollView
         style={styles.content}
@@ -9839,7 +9745,31 @@ const DashboardScreen = ({ navigation }: any) => {
                     {!selectedSection && !isShiftEnded && (
                       <View style={styles.selectionContainer}>
                         <Text style={styles.selectionTitle}>Select Action</Text>
-                        {/* Delivery notes are captured when the batch is started (top bar), not here. */}
+                        <TouchableOpacity
+                          style={styles.selectionCard}
+                          onPress={() => {
+                            setSelectedSection("input");
+                            setCrusherDnNoInput(crusherDnNo);
+                          }}
+                        >
+                          <View
+                            style={[
+                              styles.selectionIconBox,
+                              { backgroundColor: "#0369a1" },
+                            ]}
+                          >
+                            <FileText color="#FFF" size={28} />
+                          </View>
+                          <View style={styles.selectionText}>
+                            <Text style={styles.selectionCardTitle}>Input</Text>
+                            <Text style={styles.selectionCardSub}>
+                              {crusherDnNo
+                                ? `DN: ${crusherDnNo}`
+                                : "Scan or enter Delivery Note No."}
+                            </Text>
+                          </View>
+                          <ChevronRight color="#CCC" size={24} />
+                        </TouchableOpacity>
                         <TouchableOpacity
                           style={styles.selectionCard}
                           onPress={() => setSelectedSection("output")}
@@ -21644,20 +21574,6 @@ const DashboardScreen = ({ navigation }: any) => {
                       {previewData?.date}
                     </Text>
                   </View>
-                  {previewData?.isPet && (
-                    <>
-                      <View style={styles.previewItem}>
-                        <Text style={styles.previewLabel}>{t("petBatch.batchNumber")}</Text>
-                        <Text style={styles.previewValue}>{previewData.petBatchNo || "—"}</Text>
-                      </View>
-                      <View style={styles.previewItemRight}>
-                        <Text style={styles.previewLabel}>{t("petBatch.bagNumber")}</Text>
-                        <Text style={[styles.previewValue, styles.previewValueRight]}>
-                          {previewData.bagNumber}
-                        </Text>
-                      </View>
-                    </>
-                  )}
                 </View>
 
                 {/* Jumbo bag type — full-width column so long labels (e.g. ID) never overlap Remark */}
