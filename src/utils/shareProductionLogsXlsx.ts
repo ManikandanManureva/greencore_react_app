@@ -87,8 +87,9 @@ function buildFlatRows(grouped: LogsAllGrouped): Record<string, string | number>
       }
     }
   }
+  // Oldest transaction first (ascending), like every other Excel report.
   rows.sort((a, b) =>
-    String(b['Date & Time']).localeCompare(String(a['Date & Time'])),
+    String(a['Date & Time']).localeCompare(String(b['Date & Time'])),
   );
   // Add serial number and format date after sorting
   return rows.map((r, i) => ({

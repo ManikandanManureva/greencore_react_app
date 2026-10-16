@@ -88,12 +88,12 @@ function formatDateDMY(date: string | null | undefined): string {
 // ── Row builder ──────────────────────────────────────────────────────────────
 
 function buildRows(records: RawMaterial[]): Record<string, string | number>[] {
-  // Sort newest entry date first
-  const sorted = [...records].sort((a, b) => {
-    const da = a.entrydate ?? '';
-    const db = b.entrydate ?? '';
-    return db.localeCompare(da);
-  });
+  // Oldest entry first (ascending): entry date, then entry time, then record id
+  const sorted = [...records].sort((a, b) =>
+    String(a.entrydate ?? '').localeCompare(String(b.entrydate ?? '')) ||
+    String(a.entrytime ?? '').localeCompare(String(b.entrytime ?? '')) ||
+    (a.id ?? 0) - (b.id ?? 0),
+  );
 
   return sorted.map((r, i) => ({
     'S.No':                 i + 1,
