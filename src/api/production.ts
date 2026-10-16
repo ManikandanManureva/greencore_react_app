@@ -212,8 +212,17 @@ export const correctionsApi = {
   ) => client.put(`/production/logs/${logId}/correct`, body),
   /** Supervisor: delete a bag entered by mistake. */
   deleteLog: (logId: number) => client.delete(`/production/logs/${logId}`),
-  /** Supervisor: reopen a shift the shift leader closed early by mistake. */
+  /** Supervisor: one shift's details (status, shift type, start / end time, shift leader). */
+  getShift: (shiftId: number) => client.get(`/production/shifts/${shiftId}/detail`),
+  /** Supervisor: close a running shift. */
+  closeShift: (shiftId: number) => client.post(`/production/shifts/${shiftId}/close`),
+  /** Supervisor: reopen a closed shift (any age; the shift leader must have no other open shift). */
   reopenShift: (shiftId: number) => client.post(`/production/shifts/${shiftId}/reopen`),
+  /** Supervisor: change shift type and start / end time (ISO instants). */
+  updateShift: (
+    shiftId: number,
+    body: { shift_type_id?: number; start_time?: string; end_time?: string | null },
+  ) => client.put(`/production/shifts/${shiftId}`, body),
   /** First day with production / incoming data — export "From" dates default to it. */
   getDataStart: () => client.get('/production/data-start'),
 };

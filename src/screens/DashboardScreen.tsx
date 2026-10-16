@@ -821,6 +821,15 @@ const DashboardScreen = ({ navigation }: any) => {
   /** PPIC: bag status in the edit dialog; supervisor: corrected line / output type. */
   const [editStatusValue, setEditStatusValue] = useState<"pending" | "Completed">("pending");
   const [editSubLineValue, setEditSubLineValue] = useState<string | null>(null);
+  /** Supervisor shift controls (shift report): the shift's details + the Edit Shift dialog. */
+  const [supShift, setSupShift] = useState<any>(null);
+  const [showShiftEdit, setShowShiftEdit] = useState(false);
+  const [shiftEditTypeId, setShiftEditTypeId] = useState<number | null>(null);
+  const [shiftEditStartDate, setShiftEditStartDate] = useState<Date>(new Date());
+  const [shiftEditStartTime, setShiftEditStartTime] = useState("");
+  const [shiftEditEndDate, setShiftEditEndDate] = useState<Date>(new Date());
+  const [shiftEditEndTime, setShiftEditEndTime] = useState("");
+  const [shiftEditSaving, setShiftEditSaving] = useState(false);
 
   // Washing logs list state
   const [washingLogs, setWashingLogs] = useState<any[]>([]);
@@ -3083,24 +3092,135 @@ const DashboardScreen = ({ navigation }: any) => {
     );
   };
 
-  /** Supervisor: reopen the shift on screen (closed early by mistake). */
+  /** Supervisor: details of the shift on screen (status, type, start / end time). */
+  const loadSupShift = useCallback(async (shiftId: number | null) => {
+    if (!shiftId) {
+      setSupShift(null);
+      return;
+    }
+    try {
+      const res = await correctionsApi.getShift(shiftId);
+      setSupShift(res.data?.data || null);
+    } catch {
+      setSupShift(null);
+    }
+  }, []);
+  useEffect(() => {
+    if (canCorrectProduction && showShiftClosedView) loadSupShift(closedShiftId);
+    else setSupShift(null);
+  }, [canCorrectProduction, showShiftClosedView, closedShiftId, loadSupShift]);
+
+  /** After a shift change: reload its details and the report (live when open). */
+  const refreshSupShiftView = async (shiftId: number) => {
+    const res = await correctionsApi.getShift(shiftId);
+    const s = res.data?.data;
+    setSupShift(s || null);
+    await handleSelectAnyShift(shiftId, !!s?.is_active);
+  };
+
+  /** Supervisor: reopen the shift on screen. */
   const reopenViewedShift = () => {
     if (!closedShiftId || !canCorrectProduction) return;
     confirmAction(
       "Reopen shift",
-      `Reopen ${closedShiftMeta?.shift ?? "this shift"} for ${closedShiftMeta?.operator ?? "the shift leader"}? They can log outputs again until the shift ends.`,
+      `Reopen ${supShift?.shift_name ?? closedShiftMeta?.shift ?? "this shift"} for ${supShift?.operator_name ?? closedShiftMeta?.operator ?? "the shift leader"}? They can log outputs again.`,
       "Reopen",
       t("common.cancel"),
       async () => {
         try {
           await correctionsApi.reopenShift(closedShiftId);
+          await refreshSupShiftView(closedShiftId);
           notify("Shift reopened", "The shift leader can continue logging. Ask them to reopen the app if it still shows the shift as closed.");
-          await handleSelectAnyShift(closedShiftId, true);
         } catch (e: any) {
           notify(t("common.error"), e?.response?.data?.message || "Could not reopen the shift.");
         }
       },
     );
+  };
+
+  /** Supervisor: close the running shift on screen. */
+  const closeViewedShift = () => {
+    if (!closedShiftId || !canCorrectProduction) return;
+    confirmAction(
+      "Close shift",
+      `Close ${supShift?.shift_name ?? "this shift"} for ${supShift?.operator_name ?? "the shift leader"} now?`,
+      "Close",
+      t("common.cancel"),
+      async () => {
+        try {
+          await correctionsApi.closeShift(closedShiftId);
+          await refreshSupShiftView(closedShiftId);
+          notify("Shift closed");
+        } catch (e: any) {
+          notify(t("common.error"), e?.response?.data?.message || "Could not close the shift.");
+        }
+      },
+      true,
+    );
+  };
+
+  const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  const fmtShiftTime = (v?: string | null) => {
+    if (!v) return "—";
+    const d = new Date(v);
+    if (isNaN(d.getTime())) return "—";
+    return `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()} ${hhmm(d)}`;
+  };
+  /** Date picked + "HH:MM" typed (device local time) → ISO instant, or null if the time is invalid. */
+  const toShiftInstant = (date: Date, time: string): string | null => {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(time.trim());
+    if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) return null;
+    const d = new Date(date);
+    d.setHours(Number(m[1]), Number(m[2]), 0, 0);
+    return d.toISOString();
+  };
+
+  const openShiftEdit = () => {
+    if (!supShift) return;
+    const start = new Date(supShift.start_time);
+    const end = supShift.end_time ? new Date(supShift.end_time) : new Date();
+    setShiftEditTypeId(supShift.shift_type_id ?? null);
+    setShiftEditStartDate(start);
+    setShiftEditStartTime(hhmm(start));
+    setShiftEditEndDate(end);
+    setShiftEditEndTime(supShift.end_time ? hhmm(end) : "");
+    setShowShiftEdit(true);
+  };
+
+  const saveShiftEdit = async () => {
+    if (!closedShiftId || !supShift) return;
+    const startIso = toShiftInstant(shiftEditStartDate, shiftEditStartTime);
+    if (!startIso) {
+      notify(t("common.error"), "Enter the start time as HH:MM, e.g. 07:00.");
+      return;
+    }
+    let endIso: string | null | undefined;
+    if (!supShift.is_active) {
+      endIso = toShiftInstant(shiftEditEndDate, shiftEditEndTime);
+      if (!endIso) {
+        notify(t("common.error"), "Enter the end time as HH:MM, e.g. 15:00.");
+        return;
+      }
+      if (new Date(endIso) <= new Date(startIso)) {
+        notify(t("common.error"), "The end time must be after the start time.");
+        return;
+      }
+    }
+    setShiftEditSaving(true);
+    try {
+      await correctionsApi.updateShift(closedShiftId, {
+        ...(shiftEditTypeId != null ? { shift_type_id: shiftEditTypeId } : {}),
+        start_time: startIso,
+        ...(endIso !== undefined ? { end_time: endIso } : {}),
+      });
+      setShowShiftEdit(false);
+      await refreshSupShiftView(closedShiftId);
+      notify("Shift updated");
+    } catch (e: any) {
+      notify(t("common.error"), e?.response?.data?.message || "Could not update the shift.");
+    } finally {
+      setShiftEditSaving(false);
+    }
   };
 
   const saveEditedLogWeight = async () => {
@@ -6094,20 +6214,72 @@ const DashboardScreen = ({ navigation }: any) => {
                   </Text>
                 </TouchableOpacity>
               </View>
-              {canCorrectProduction && !viewingActiveShift && closedShiftId ? (
-                <TouchableOpacity
-                  onPress={reopenViewedShift}
+              {canCorrectProduction && closedShiftId && supShift ? (
+                <View
                   style={{
-                    alignSelf: "flex-start",
-                    marginTop: 10,
-                    backgroundColor: "#f59e0b",
-                    borderRadius: 8,
-                    paddingHorizontal: 14,
-                    paddingVertical: 9,
+                    marginTop: 12,
+                    padding: 12,
+                    borderRadius: 10,
+                    borderWidth: 1,
+                    borderColor: "#fde68a",
+                    backgroundColor: "#fffbeb",
+                    gap: 6,
                   }}
                 >
-                  <Text style={{ color: "#fff", fontWeight: "800", fontSize: 13 }}>↺ Reopen Shift</Text>
-                </TouchableOpacity>
+                  <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                    <Text style={{ fontSize: 13, fontWeight: "800", color: "#92400e" }}>Shift controls</Text>
+                    <Text
+                      style={{
+                        fontSize: 11,
+                        fontWeight: "800",
+                        color: supShift.is_active ? "#15803d" : "#475569",
+                        backgroundColor: supShift.is_active ? "#dcfce7" : "#e2e8f0",
+                        paddingHorizontal: 8,
+                        paddingVertical: 2,
+                        borderRadius: 8,
+                        overflow: "hidden",
+                      }}
+                    >
+                      {supShift.is_active ? "OPEN" : "CLOSED"}
+                    </Text>
+                  </View>
+                  <Text style={{ fontSize: 12, color: "#475569" }}>
+                    {supShift.shift_name || "—"} · {supShift.operator_name || "—"}
+                  </Text>
+                  <Text style={{ fontSize: 12, color: "#475569" }}>
+                    Start {fmtShiftTime(supShift.start_time)} · End {fmtShiftTime(supShift.end_time)}
+                  </Text>
+                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 4 }}>
+                    {supShift.is_active ? (
+                      <TouchableOpacity
+                        onPress={closeViewedShift}
+                        style={{ backgroundColor: "#dc2626", borderRadius: 8, paddingHorizontal: 14, paddingVertical: 9 }}
+                      >
+                        <Text style={{ color: "#fff", fontWeight: "800", fontSize: 13 }}>■ Close Shift</Text>
+                      </TouchableOpacity>
+                    ) : (
+                      <TouchableOpacity
+                        onPress={reopenViewedShift}
+                        style={{ backgroundColor: "#f59e0b", borderRadius: 8, paddingHorizontal: 14, paddingVertical: 9 }}
+                      >
+                        <Text style={{ color: "#fff", fontWeight: "800", fontSize: 13 }}>↺ Reopen Shift</Text>
+                      </TouchableOpacity>
+                    )}
+                    <TouchableOpacity
+                      onPress={openShiftEdit}
+                      style={{
+                        backgroundColor: "#fff",
+                        borderWidth: 1,
+                        borderColor: "#d97706",
+                        borderRadius: 8,
+                        paddingHorizontal: 14,
+                        paddingVertical: 9,
+                      }}
+                    >
+                      <Text style={{ color: "#b45309", fontWeight: "800", fontSize: 13 }}>✎ Edit Shift</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
               ) : null}
               {/* ── Production Outputs: categorised + search + pagination ── */}
               {closedShiftLogsLoading ? (
@@ -22218,6 +22390,105 @@ const DashboardScreen = ({ navigation }: any) => {
                 </View>
               </TouchableOpacity>
             </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={showShiftEdit} transparent animationType="fade" onRequestClose={() => setShowShiftEdit(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Edit Shift</Text>
+              <TouchableOpacity onPress={() => setShowShiftEdit(false)}>
+                <X color="#333" size={24} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView keyboardShouldPersistTaps="handled">
+              <Text style={{ fontSize: 12, color: "#64748b", marginBottom: 8 }}>
+                {supShift?.operator_name || ""}
+                {supShift?.is_active ? " · shift is open" : " · shift is closed"}
+              </Text>
+              <Text style={styles.label}>Shift</Text>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+                {ppicShifts.map((st: any) => {
+                  const active = shiftEditTypeId === st.id;
+                  return (
+                    <TouchableOpacity
+                      key={st.id}
+                      onPress={() => setShiftEditTypeId(st.id)}
+                      style={{
+                        paddingHorizontal: 12,
+                        paddingVertical: 8,
+                        borderRadius: 16,
+                        borderWidth: 1,
+                        borderColor: active ? "#0ea5e9" : "#d1d5db",
+                        backgroundColor: active ? "#e0f2fe" : "#fff",
+                      }}
+                    >
+                      <Text style={{ fontWeight: "700", fontSize: 13, color: active ? "#0369a1" : "#4b5563" }}>
+                        {st.name}
+                        {st.start_time ? ` (${String(st.start_time).slice(0, 5)}–${String(st.end_time).slice(0, 5)})` : ""}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <Text style={styles.label}>Start</Text>
+              <View style={{ flexDirection: "row", gap: 8, alignItems: "center", marginBottom: 12 }}>
+                <View style={{ flex: 1 }}>
+                  <StationDatePicker value={shiftEditStartDate} onChange={setShiftEditStartDate} maximumDate={new Date()} />
+                </View>
+                <TextInput
+                  style={[styles.input as any, { width: 90, textAlign: "center" }]}
+                  value={shiftEditStartTime}
+                  onChangeText={setShiftEditStartTime}
+                  placeholder="07:00"
+                  placeholderTextColor="#94a3b8"
+                  maxLength={5}
+                />
+              </View>
+              {supShift && !supShift.is_active ? (
+                <>
+                  <Text style={styles.label}>End</Text>
+                  <View style={{ flexDirection: "row", gap: 8, alignItems: "center", marginBottom: 12 }}>
+                    <View style={{ flex: 1 }}>
+                      <StationDatePicker value={shiftEditEndDate} onChange={setShiftEditEndDate} maximumDate={new Date()} />
+                    </View>
+                    <TextInput
+                      style={[styles.input as any, { width: 90, textAlign: "center" }]}
+                      value={shiftEditEndTime}
+                      onChangeText={setShiftEditEndTime}
+                      placeholder="15:00"
+                      placeholderTextColor="#94a3b8"
+                      maxLength={5}
+                    />
+                  </View>
+                </>
+              ) : (
+                <Text style={{ fontSize: 12, color: "#64748b", marginBottom: 12 }}>
+                  End time is set when the shift is closed.
+                </Text>
+              )}
+              <View style={{ flexDirection: "row", gap: 12, marginTop: 8 }}>
+                <TouchableOpacity
+                  style={[styles.primaryButton, { flex: 1, backgroundColor: "#64748b" }]}
+                  onPress={() => setShowShiftEdit(false)}
+                >
+                  <Text style={styles.primaryButtonText}>{t("common.cancel")}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.primaryButton, { flex: 1 }]}
+                  onPress={saveShiftEdit}
+                  disabled={shiftEditSaving}
+                >
+                  {shiftEditSaving ? (
+                    <ActivityIndicator color="#FFF" />
+                  ) : (
+                    <Text style={styles.primaryButtonText}>{t("common.save")}</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
           </View>
         </View>
       </Modal>
