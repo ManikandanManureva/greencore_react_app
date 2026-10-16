@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "greencore_app_react",
+    "name": "Greencore Production",
     "slug": "greencore_app_react",
     "version": "1.0.0",
     "sdkVersion": "54.0.0",
@@ -38,6 +38,8 @@
       "package": "com.anonymous.greencore_app_react"
     },
     "web": {
+      "name": "Greencore Production",
+      "shortName": "Greencore",
       "favicon": "./assets/favicon.png",
       "bundler": "metro"
     },
