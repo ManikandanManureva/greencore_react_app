@@ -83,6 +83,8 @@ export const inventoryApi = {
     materialType?: string;
     page?: number;
     limit?: number;
+    /** '1' for an Excel export: the whole date range instead of one 200-row page. */
+    export?: '1';
   }) => client.get('/inventory/raw-materials', { params }),
 
   /** Single gate-entry record by id. */

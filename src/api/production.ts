@@ -204,6 +204,20 @@ export const productionApi = {
   ) => client.put(`/production/logs-update/${logId}`, body),
 };
 
+export const correctionsApi = {
+  /** Supervisor: correct a wrong bag — line / output type (same station), weight, remark, status. */
+  correctLog: (
+    logId: number,
+    body: { sub_line?: string; weight?: number; remark?: string; status?: 'pending' | 'Completed' },
+  ) => client.put(`/production/logs/${logId}/correct`, body),
+  /** Supervisor: delete a bag entered by mistake. */
+  deleteLog: (logId: number) => client.delete(`/production/logs/${logId}`),
+  /** Supervisor: reopen a shift the shift leader closed early by mistake. */
+  reopenShift: (shiftId: number) => client.post(`/production/shifts/${shiftId}/reopen`),
+  /** First day with production / incoming data — export "From" dates default to it. */
+  getDataStart: () => client.get('/production/data-start'),
+};
+
 export const masterDataApi = {
   getLines: () => client.get('/production/lines'),
   getShifts: () => client.get('/production/shifts'),

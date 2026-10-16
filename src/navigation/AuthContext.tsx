@@ -11,6 +11,8 @@ interface User {
   role: string;
   materialTypeId?: number;
   lastLoginAt?: string;
+  /** Supervisor corrections (e.g. Yoga): delete / correct bags, reopen shifts. */
+  canCorrectProduction?: boolean;
 }
 
 interface AuthContextType {

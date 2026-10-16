@@ -5,6 +5,8 @@ export interface User {
   email: string;
   role: string;
   lastLoginAt?: string;
+  /** Supervisor corrections (e.g. Yoga): delete / correct bags, reopen shifts. */
+  canCorrectProduction?: boolean;
 }
 
 export interface ProductionLine {

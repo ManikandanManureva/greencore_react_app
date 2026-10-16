@@ -45,7 +45,8 @@ import {
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { productionLineTitleKeyFromRole } from "../utils/productionLine";
 import { useAuth } from "../navigation/AuthContext";
-import { productionApi, masterDataApi } from "../api/production";
+import { productionApi, masterDataApi, correctionsApi } from "../api/production";
+import { confirmAction, notify } from "../utils/confirm";
 import {
   inventoryApi,
   INVENTORY_STATUSES,
@@ -100,6 +101,21 @@ function formatIncomingDateTime(
   const yyyy = d.getUTCFullYear();
   const time = timeStr ? timeStr.slice(0, 5) : "00:00";
   return `${dd}/${mm}/${yyyy} ${time}`;
+}
+
+/**
+ * Lines / output types a supervisor can swap a bag between: same station, the operator only picked
+ * the wrong one (e.g. Extrusion 1 → Mixture, Flakes PE SUPER → Flakes PE 1). Mirrors the API.
+ */
+const CORRECTABLE_SUB_LINE_GROUPS: string[][] = [
+  ["3E", "Rapid", "Betty"],
+  ["Washing 1", "Washing 2", "Washing 3"],
+  ["Extrusion 1", "Extrusion 2", "Extrusion 3", "Mixture"],
+  ["Flakes PE SUPER", "Flakes PE 1", "Flakes EVA SUPER", "Flakes EVA 1"],
+  ["Pellet PE SUPER", "Pellet PE 1", "Pellet EVA SUPER", "Pellet EVA 1"],
+];
+function correctableSubLines(current?: string | null): string[] {
+  return CORRECTABLE_SUB_LINE_GROUPS.find((g) => g.includes(String(current || ""))) || [];
 }
 
 /** Rounds to 2 decimals, but drops the ".00" when the value is a whole number. */
@@ -549,6 +565,8 @@ const DashboardScreen = ({ navigation }: any) => {
   const isPET = user?.role?.toLowerCase() === "pet";
 
   const isPPIC = user?.role?.toLowerCase() === "ppic";
+  /** PPIC supervisor (e.g. Yoga): may delete / correct bags and reopen a shift closed by mistake. */
+  const canCorrectProduction = isPPIC && user?.canCorrectProduction === true;
 
   /**
    * Roles allowed to edit a log regardless of its status. PPIC has always had
@@ -800,6 +818,9 @@ const DashboardScreen = ({ navigation }: any) => {
   const [editWeightValue, setEditWeightValue] = useState("");
   /** PPIC: edited together with weight in the same modal */
   const [editRemarkValue, setEditRemarkValue] = useState("");
+  /** PPIC: bag status in the edit dialog; supervisor: corrected line / output type. */
+  const [editStatusValue, setEditStatusValue] = useState<"pending" | "Completed">("pending");
+  const [editSubLineValue, setEditSubLineValue] = useState<string | null>(null);
 
   // Washing logs list state
   const [washingLogs, setWashingLogs] = useState<any[]>([]);
@@ -1212,6 +1233,19 @@ const DashboardScreen = ({ navigation }: any) => {
     })();
   }, [user?.role]);
 
+  // PPIC: exports start from the first day of data ("From" defaults to it; still changeable).
+  useEffect(() => {
+    if (user?.role?.toLowerCase() !== "ppic") return;
+    correctionsApi
+      .getDataStart()
+      .then((res) => {
+        const d = res.data?.data;
+        if (d?.production) setPpicExportDateStart(d.production);
+        if (d?.incoming) setPpicIncomingDateStart(d.incoming);
+      })
+      .catch(() => {});
+  }, [user?.role]);
+
   // PPIC: load production operators (for the Export Report operator filter)
   useEffect(() => {
     if (user?.role?.toLowerCase() !== "ppic") return;
@@ -1309,7 +1343,7 @@ const DashboardScreen = ({ navigation }: any) => {
         ...(shiftName ? { shift_type: shiftName } : {}),
         ...(stationCode ? { station_code: stationCode } : {}),
         ...(operatorId ? { operator_id: operatorId } : {}),
-        limit: 25000,
+        limit: 200000,
       });
       const payload = res.data as
         | { success?: boolean; data?: LogsAllGrouped; total?: number }
@@ -1352,7 +1386,7 @@ const DashboardScreen = ({ navigation }: any) => {
       if (format === "csv") {
         successNotes.push(t("messages.exportExcelCsvFallback"));
       }
-      if ((payload.total ?? 0) >= 25000) {
+      if ((payload.total ?? 0) >= 200000) {
         successNotes.push(t("messages.exportExcelRowLimit"));
       }
       if (successNotes.length > 0) {
@@ -1391,7 +1425,8 @@ const DashboardScreen = ({ navigation }: any) => {
         date_start: ppicIncomingDateStart,
         date_end: ppicIncomingDateEnd,
         ...(ppicIncomingMaterialType !== 'all' ? { materialType: ppicIncomingMaterialType } : {}),
-        limit: 25000,
+        limit: 200000,
+        export: '1',
       });
       const payload = res.data as { success?: boolean; data?: any[]; total?: number } | undefined;
       if (!payload?.success || !Array.isArray(payload.data)) {
@@ -1408,8 +1443,8 @@ const DashboardScreen = ({ navigation }: any) => {
       if (format === 'csv') {
         Alert.alert("Success", "Exported as CSV (Excel not available on this device).");
       }
-      if ((payload.total ?? 0) >= 25000) {
-        Alert.alert("Note", "Only the first 25,000 rows were exported.");
+      if ((payload.total ?? 0) > 200000) {
+        Alert.alert("Note", "Only the first 200,000 rows were exported.");
       }
     } catch (e: unknown) {
       const detail = e instanceof Error ? e.message : String(e);
@@ -2984,6 +3019,88 @@ const DashboardScreen = ({ navigation }: any) => {
     setEditingLogWeight(log);
     setEditWeightValue(String(log.weight || ""));
     setEditRemarkValue(String(log?.remark ?? ""));
+    setEditStatusValue(String(log?.status || "").toLowerCase() === "completed" ? "Completed" : "pending");
+    setEditSubLineValue(log?.sub_line ?? null);
+  };
+
+  const closeEditLog = () => {
+    setEditingLogWeight(null);
+    setEditWeightValue("");
+    setEditRemarkValue("");
+    setEditSubLineValue(null);
+  };
+
+  /** Refresh the open shift report's totals after a bag changed or was removed. */
+  const refreshShiftViewTotals = async () => {
+    if (!(showShiftClosedView && closedShiftId)) return;
+    try {
+      const sumRes = await productionApi.getShiftSummary(closedShiftId);
+      if (sumRes.data?.success && sumRes.data.data) {
+        const d = sumRes.data.data;
+        setClosedShiftMeta((prev) =>
+          prev
+            ? {
+                ...prev,
+                totalOutputs: d.totalOutputs ?? 0,
+                totalWeight: d.totalWeight ?? "0.0",
+                byStation: d.byStation ?? prev.byStation,
+              }
+            : null,
+        );
+      }
+    } catch {
+      // totals refresh on the next open
+    }
+  };
+
+  /** Supervisor: delete a bag entered by mistake (refused if another bag used it as input). */
+  const deleteEditedLog = () => {
+    const log = editingLogWeight;
+    if (!log || !canCorrectProduction) return;
+    confirmAction(
+      "Delete bag",
+      `Delete ${log.output_bag_qr || "this bag"} (${log.sub_line || "—"}, ${log.weight} kg)? This cannot be undone.`,
+      "Delete",
+      t("common.cancel"),
+      async () => {
+        setIsLoading(true);
+        try {
+          await correctionsApi.deleteLog(log.id);
+          const drop = (list: any[]) => list.filter((l) => l.id !== log.id);
+          setClosedShiftLogs(drop);
+          setShiftLogs(drop);
+          setPpicOverviewData((prev) => prev.map((st) => ({ ...st, logs: drop(st.logs) })));
+          closeEditLog();
+          await refreshShiftViewTotals();
+          notify("Bag deleted", log.output_bag_qr || "");
+        } catch (e: any) {
+          notify(t("common.error"), e?.response?.data?.message || "Could not delete the bag.");
+        } finally {
+          setIsLoading(false);
+        }
+      },
+      true,
+    );
+  };
+
+  /** Supervisor: reopen the shift on screen (closed early by mistake). */
+  const reopenViewedShift = () => {
+    if (!closedShiftId || !canCorrectProduction) return;
+    confirmAction(
+      "Reopen shift",
+      `Reopen ${closedShiftMeta?.shift ?? "this shift"} for ${closedShiftMeta?.operator ?? "the shift leader"}? They can log outputs again until the shift ends.`,
+      "Reopen",
+      t("common.cancel"),
+      async () => {
+        try {
+          await correctionsApi.reopenShift(closedShiftId);
+          notify("Shift reopened", "The shift leader can continue logging. Ask them to reopen the app if it still shows the shift as closed.");
+          await handleSelectAnyShift(closedShiftId, true);
+        } catch (e: any) {
+          notify(t("common.error"), e?.response?.data?.message || "Could not reopen the shift.");
+        }
+      },
+    );
   };
 
   const saveEditedLogWeight = async () => {
@@ -2996,12 +3113,23 @@ const DashboardScreen = ({ navigation }: any) => {
     const remarkTrim = editRemarkValue.trim();
     const newRemark = remarkTrim === "" ? null : remarkTrim;
 
+    const subLineChanged =
+      canCorrectProduction && editSubLineValue != null && editSubLineValue !== editingLogWeight.sub_line;
+
     setIsLoading(true);
     try {
-      if (isPPIC) {
+      if (canCorrectProduction) {
+        await correctionsApi.correctLog(editingLogWeight.id, {
+          weight: w,
+          remark: remarkTrim,
+          status: editStatusValue,
+          ...(subLineChanged ? { sub_line: editSubLineValue! } : {}),
+        });
+      } else if (isPPIC) {
         await productionApi.updateProductionLogFields(editingLogWeight.id, {
           weight: w,
           remark: remarkTrim === "" ? "" : remarkTrim,
+          status: editStatusValue,
         });
       } else {
         await productionApi.updateLogWeight(editingLogWeight.id, w);
@@ -3010,7 +3138,13 @@ const DashboardScreen = ({ navigation }: any) => {
       const applyPatch = (log: any) => {
         if (log.id !== editingLogWeight.id) return log;
         return isPPIC
-          ? { ...log, weight: w, remark: newRemark }
+          ? {
+              ...log,
+              weight: w,
+              remark: newRemark,
+              status: editStatusValue,
+              ...(subLineChanged ? { sub_line: editSubLineValue } : {}),
+            }
           : { ...log, weight: w };
       };
 
@@ -5960,6 +6094,21 @@ const DashboardScreen = ({ navigation }: any) => {
                   </Text>
                 </TouchableOpacity>
               </View>
+              {canCorrectProduction && !viewingActiveShift && closedShiftId ? (
+                <TouchableOpacity
+                  onPress={reopenViewedShift}
+                  style={{
+                    alignSelf: "flex-start",
+                    marginTop: 10,
+                    backgroundColor: "#f59e0b",
+                    borderRadius: 8,
+                    paddingHorizontal: 14,
+                    paddingVertical: 9,
+                  }}
+                >
+                  <Text style={{ color: "#fff", fontWeight: "800", fontSize: 13 }}>↺ Reopen Shift</Text>
+                </TouchableOpacity>
+              ) : null}
               {/* ── Production Outputs: categorised + search + pagination ── */}
               {closedShiftLogsLoading ? (
                 <View style={{ marginVertical: 12, alignItems: "center" }}>
@@ -22081,7 +22230,7 @@ const DashboardScreen = ({ navigation }: any) => {
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>{t("dashboard.editWeight")}</Text>
+              <Text style={styles.modalTitle}>{isPPIC ? "Edit Bag" : t("dashboard.editWeight")}</Text>
               <TouchableOpacity
                 onPress={() => {
                   setEditingLogWeight(null);
@@ -22118,6 +22267,90 @@ const DashboardScreen = ({ navigation }: any) => {
                   numberOfLines={4}
                 />
               </View>
+            ) : null}
+            {isPPIC && editingLogWeight ? (
+              <View style={[styles.inputGroup, { marginTop: 12 }]}>
+                <Text style={styles.label}>Status</Text>
+                <View style={{ flexDirection: "row", gap: 8 }}>
+                  {(["pending", "Completed"] as const).map((st) => {
+                    const active = editStatusValue === st;
+                    return (
+                      <TouchableOpacity
+                        key={st}
+                        onPress={() => setEditStatusValue(st)}
+                        style={{
+                          flex: 1,
+                          paddingVertical: 10,
+                          borderRadius: 8,
+                          alignItems: "center",
+                          borderWidth: 1,
+                          borderColor: active ? (st === "pending" ? "#d97706" : "#15803d") : "#d1d5db",
+                          backgroundColor: active ? (st === "pending" ? "#fef3c7" : "#dcfce7") : "#fff",
+                        }}
+                      >
+                        <Text
+                          style={{
+                            fontWeight: "700",
+                            color: active ? (st === "pending" ? "#b45309" : "#15803d") : "#4b5563",
+                          }}
+                        >
+                          {st === "pending" ? "Pending" : "Completed"}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+            ) : null}
+            {canCorrectProduction && editingLogWeight && correctableSubLines(editingLogWeight.sub_line).length > 0 ? (
+              <View style={[styles.inputGroup, { marginTop: 12 }]}>
+                <Text style={styles.label}>Line / Output type</Text>
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+                  {correctableSubLines(editingLogWeight.sub_line).map((sl) => {
+                    const active = editSubLineValue === sl;
+                    return (
+                      <TouchableOpacity
+                        key={sl}
+                        onPress={() => setEditSubLineValue(sl)}
+                        style={{
+                          paddingHorizontal: 12,
+                          paddingVertical: 8,
+                          borderRadius: 16,
+                          borderWidth: 1,
+                          borderColor: active ? "#0ea5e9" : "#d1d5db",
+                          backgroundColor: active ? "#e0f2fe" : "#fff",
+                        }}
+                      >
+                        <Text style={{ fontWeight: "700", fontSize: 13, color: active ? "#0369a1" : "#4b5563" }}>
+                          {sl === "Mixture" ? "Mixture (Extrusion Mix)" : sl}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                {editSubLineValue !== editingLogWeight.sub_line ? (
+                  <Text style={{ fontSize: 12, color: "#b45309", marginTop: 6 }}>
+                    {editingLogWeight.sub_line} → {editSubLineValue}. The bag keeps its QR code; reprint the label to show the new line.
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
+            {canCorrectProduction && editingLogWeight ? (
+              <TouchableOpacity
+                onPress={deleteEditedLog}
+                disabled={isLoading}
+                style={{
+                  marginTop: 16,
+                  paddingVertical: 10,
+                  borderRadius: 8,
+                  borderWidth: 1,
+                  borderColor: "#fca5a5",
+                  backgroundColor: "#fef2f2",
+                  alignItems: "center",
+                }}
+              >
+                <Text style={{ color: "#b91c1c", fontWeight: "700" }}>Delete bag</Text>
+              </TouchableOpacity>
             ) : null}
             <View style={{ flexDirection: "row", gap: 12, marginTop: 20 }}>
               <TouchableOpacity
