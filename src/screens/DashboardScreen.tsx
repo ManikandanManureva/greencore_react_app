@@ -47,6 +47,7 @@ import { productionLineTitleKeyFromRole } from "../utils/productionLine";
 import { useAuth } from "../navigation/AuthContext";
 import { productionApi, masterDataApi, correctionsApi } from "../api/production";
 import { confirmAction, notify } from "../utils/confirm";
+import { pickShiftAfterClose, shiftAtTime } from "../utils/nextShift";
 import {
   inventoryApi,
   INVENTORY_STATUSES,
@@ -1054,6 +1055,7 @@ const DashboardScreen = ({ navigation }: any) => {
 
   // Auto-close shift tracking
   const [autoCloseWarningShown, setAutoCloseWarningShown] = useState(false);
+  const [showPreviousShiftWaste, setShowPreviousShiftWaste] = useState(false);
 
   // Printer & Preview State
   const [selectedPrinter, setSelectedPrinter] = useState<any>(null);
@@ -1954,61 +1956,105 @@ const DashboardScreen = ({ navigation }: any) => {
       return;
 
     let closing = false; // guard against double-close
+    let cancelled = false;
+
+    const resetAfterAutoClose = () => {
+      setIsShiftActive(false);
+      setBackendShiftId(null);
+      setShiftLogs([]);
+      setShiftStartTime(null);
+      setSelectedStation(null);
+      setSelectedSection(null);
+      setSelectedSubLine(null);
+      setAutoCloseWarningShown(false);
+      setShowEndShiftSummary(false);
+    };
 
     const tick = async () => {
       const times = getShiftAutoCloseTimes(shiftStartTime, selectedShift);
       if (!times) return;
 
       const now = Date.now();
+      if (now < times.scheduledEnd || closing || closeShiftInProgressRef.current)
+        return;
 
-      // ── Grace period expired → auto-close ──────────────────────────────────
-      if (now >= times.graceEnd) {
-        if (closing) return;
-        closing = true;
+      closing = true;
+      try {
+        // Asked fresh each time: shiftLogs may not have loaded yet when this first runs.
+        let nothingLogged = false;
         try {
+          const logsRes = await productionApi.getShiftLogs(backendShiftId);
+          nothingLogged =
+            !!logsRes.data?.success && logsRes.data.data?.length === 0;
+        } catch (_) {
+          /* treat as logged, so the normal grace period applies */
+        }
+        if (cancelled || closeShiftInProgressRef.current) return;
+
+        // ── Over with nothing logged (e.g. nobody on this line tonight) → close now ──
+        // so the next leader can't log into it. It doesn't start another shift, or a line
+        // left unattended with the app open would keep opening empty shifts.
+        if (nothingLogged && !showEndShiftSummary) {
           const response = await productionApi.endShift(backendShiftId);
           if (response.data.success) {
-            Alert.alert(
-              "Shift Auto-Closed",
-              `Your ${selectedShift.name} shift has been automatically closed.\n\nThe shift ended at ${selectedShift.end_time} and the 15-minute grace period has elapsed.`,
-              [
-                {
-                  text: "OK",
-                  onPress: () => {
-                    setIsShiftActive(false);
-                    setBackendShiftId(null);
-                    setShiftLogs([]);
-                    setShiftStartTime(null);
-                    setSelectedStation(null);
-                    setSelectedSection(null);
-                    setSelectedSubLine(null);
-                    setAutoCloseWarningShown(false);
-                  },
-                },
-              ],
+            resetAfterAutoClose();
+            const shiftsRes = await masterDataApi.getShifts();
+            const current = shiftAtTime(
+              shiftsRes.data?.data ?? [],
+              nowMinutes(),
+            );
+            if (current) await setSelectedShift(current);
+            showToast(
+              t("messages.emptyShiftClosed", { shiftName: selectedShift.name }),
             );
           }
-        } catch (err) {
-          console.error("Error auto-closing shift:", err);
-          closing = false;
+          return;
         }
-        return;
-      }
 
-      // ── Scheduled end time reached → show one-time warning ─────────────────
-      if (now >= times.scheduledEnd && !autoCloseWarningShown) {
-        setAutoCloseWarningShown(true);
-        Alert.alert(
-          "Shift Ended",
-          `Your ${selectedShift.name} shift has reached its scheduled end time (${selectedShift.end_time}).\n\nThe shift will be automatically closed in 15 minutes if not closed manually.`,
-          [{ text: "OK" }],
-        );
+        // ── Grace period expired → auto-close and start the next shift ─────────
+        if (now >= times.graceEnd) {
+          const response = await productionApi.endShift(backendShiftId);
+          if (response.data.success) {
+            resetAfterAutoClose();
+            const next = await startShiftAfterClose(selectedShift);
+            const closedParams = {
+              shiftName: selectedShift.name,
+              endTime: selectedShift.end_time,
+            };
+            notify(
+              t("messages.shiftAutoClosedTitle"),
+              next
+                ? t("messages.shiftAutoClosedNext", {
+                    ...closedParams,
+                    nextName: next.name,
+                  })
+                : t("messages.shiftAutoClosed", closedParams),
+            );
+          }
+          return;
+        }
+
+        // ── Scheduled end time reached → show one-time warning ─────────────────
+        if (!autoCloseWarningShown) {
+          setAutoCloseWarningShown(true);
+          notify(
+            "Shift Ended",
+            `Your ${selectedShift.name} shift has reached its scheduled end time (${selectedShift.end_time}).\n\nThe shift will be automatically closed in 15 minutes if not closed manually, and the next shift will start.`,
+          );
+        }
+      } catch (err) {
+        console.error("Error auto-closing shift:", err);
+      } finally {
+        closing = false;
       }
     };
 
     tick(); // check immediately on mount / state change
     const interval = setInterval(tick, 30 * 1000); // check every 30 seconds
-    return () => clearInterval(interval);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     isShiftActive,
@@ -2016,6 +2062,7 @@ const DashboardScreen = ({ navigation }: any) => {
     selectedShift,
     shiftStartTime,
     autoCloseWarningShown,
+    showEndShiftSummary,
   ]);
 
   const loadStations = async () => {
@@ -2122,6 +2169,31 @@ const DashboardScreen = ({ navigation }: any) => {
     return () => clearTimeout(tid);
   }, [toastMessage]);
 
+  /**
+   * After a shift closes, open the next one on this login so the next shift leader can't log
+   * outputs under the closed shift. Returns the shift started, or null when none was: closed well
+   * before its end time, or the request failed. Start Shift still works in both cases.
+   */
+  const startShiftAfterClose = async (closed: Shift): Promise<Shift | null> => {
+    try {
+      const shiftsRes = await masterDataApi.getShifts();
+      const next = pickShiftAfterClose(
+        shiftsRes.data?.data ?? [],
+        Number(closed.id),
+        nowMinutes(),
+      );
+      if (!next) return null;
+      const response = await productionApi.startShift(next.id);
+      if (!response.data?.success) return null;
+      setByProductsInputs(isPET ? [] : getFullWasteTemplate());
+      await setSelectedShift(next);
+      return next;
+    } catch (e) {
+      console.warn("Could not start the next shift:", e);
+      return null;
+    }
+  };
+
   const handleStartShift = async () => {
     if (!selectedShift) return;
     try {
@@ -2154,7 +2226,21 @@ const DashboardScreen = ({ navigation }: any) => {
       setEditingByProductIndex(null);
       setEditByProductWeight("");
 
-      const response = await productionApi.startShift(selectedShift.id);
+      // Always start the shift the clock is in. The closed shift stays selected on this page,
+      // so without this a leader arriving at 15:05 would start Shift 1 again.
+      let shiftToStart: Shift = selectedShift;
+      if (!isPPIC) {
+        try {
+          const shiftsRes = await masterDataApi.getShifts();
+          shiftToStart =
+            shiftAtTime(shiftsRes.data?.data ?? [], nowMinutes()) ??
+            selectedShift;
+        } catch (_) {
+          /* start the selected shift */
+        }
+      }
+
+      const response = await productionApi.startShift(shiftToStart.id);
       if (response.data.success) {
         setBackendShiftId(response.data.data.id);
         setIsShiftActive(true);
@@ -2166,6 +2252,12 @@ const DashboardScreen = ({ navigation }: any) => {
         } else {
           // By-product rows for Close Shift only (same pattern as PC / PE)
           setByProductsInputs(getFullWasteTemplate());
+        }
+        if (Number(shiftToStart.id) !== Number(selectedShift.id)) {
+          await setSelectedShift(shiftToStart);
+          showToast(
+            t("messages.startedCurrentShift", { shiftName: shiftToStart.name }),
+          );
         }
       }
     } catch (error: any) {
@@ -2721,6 +2813,13 @@ const DashboardScreen = ({ navigation }: any) => {
       setAutoCloseWarningShown(false);
       setShowShiftClosedView(false);
       setViewingActiveShift(false);
+      setShowPreviousShiftWaste(false);
+
+      // 3) Open the next shift, so the next leader can't log under this closed one
+      const nextShift =
+        selectedShift && !isPPIC
+          ? await startShiftAfterClose(selectedShift)
+          : null;
 
       // Print/PDF after DB close — failure does not leave shift open
       try {
@@ -2739,6 +2838,16 @@ const DashboardScreen = ({ navigation }: any) => {
         Alert.alert(
           t("messages.shiftClosedPrintFailedTitle"),
           t("messages.shiftClosedPrintFailedMessage"),
+        );
+      }
+
+      if (nextShift) {
+        notify(
+          t("messages.nextShiftStartedTitle"),
+          t("messages.nextShiftStarted", {
+            closedName: savedMeta.shift,
+            nextName: nextShift.name,
+          }),
         );
       }
     } catch (error) {
@@ -6000,6 +6109,126 @@ const DashboardScreen = ({ navigation }: any) => {
     }
   };
 
+  /** The just-closed shift's waste, editable, with its PDF. Start page, or dashboard after the next shift auto-starts. */
+  const renderSavedWasteCard = () => (
+    <View style={styles.summaryStatsCard}>
+      <Text style={styles.cardTitle}>
+        {t("dashboard.wasteFromProcess")}
+      </Text>
+      <Text
+        style={{
+          fontSize: 13,
+          color: "#666",
+          marginBottom: 12,
+        }}
+      >
+        {t("dashboard.tapEditToChange")}
+      </Text>
+      {(() => {
+        let lastProcess = "";
+        return savedByProductsOnStartPage.map(
+          (item, index) => {
+            const pl =
+              item.processLabel ||
+              getProcessLabel(
+                item.stationName,
+                savedByProductsMeta?.materialTypeName,
+              );
+            const showHeader = pl !== lastProcess;
+            if (showHeader) lastProcess = pl;
+            return (
+              <View key={index}>
+                {showHeader ? (
+                  <Text
+                    style={[
+                      styles.processSectionHeader,
+                      { marginTop: index > 0 ? 16 : 0 },
+                    ]}
+                  >
+                    {getProcessTitle(pl)} :
+                  </Text>
+                ) : null}
+                <View
+                  style={[
+                    styles.byProductRow,
+                    { marginBottom: 8 },
+                  ]}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.byProductName}>
+                      {item.name}
+                    </Text>
+                    <Text style={styles.byProductStation}>
+                      {item.stationName} — {item.category}
+                    </Text>
+                  </View>
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                    }}
+                  >
+                    <Text
+                      style={[
+                        styles.byProductName,
+                        { marginRight: 12 },
+                      ]}
+                    >
+                      {Number(item.weight) || 0} kg
+                    </Text>
+                    <TouchableOpacity
+                      onPress={() => openEditByProduct(index)}
+                      style={styles.editByProductBtn}
+                      accessibilityLabel="Edit weight"
+                    >
+                      <View
+                        style={{
+                          flexDirection: "row",
+                          alignItems: "center",
+                        }}
+                      >
+                        <Pencil color="#0ea5e9" size={16} />
+                        <Text
+                          style={{
+                            fontSize: 14,
+                            fontWeight: "600",
+                            color: "#0ea5e9",
+                            marginLeft: 4,
+                          }}
+                        >
+                          {t("common.edit")}
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            );
+          },
+        );
+      })()}
+      <TouchableOpacity
+        style={[styles.closeShiftBtn, { marginTop: 16 }]}
+        onPress={handleGeneratePdfAgain}
+      >
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <FileText color="#FFF" size={20} />
+          <Text
+            style={[styles.closeShiftText, { marginLeft: 8 }]}
+          >
+            {t("dashboard.generatePDF")}
+          </Text>
+        </View>
+      </TouchableOpacity>
+    </View>
+  );
+
   /** Read-only shift label in header (no shift switching from dashboard) */
   const shiftHeaderText = (
     <Text style={styles.headerShiftText} numberOfLines={1}>
@@ -8410,124 +8639,7 @@ const DashboardScreen = ({ navigation }: any) => {
                       </View>
                       <ChevronRight color="#FFF" size={24} />
                     </TouchableOpacity>
-                    {savedByProductsOnStartPage.length > 0 && (
-                      <View style={styles.summaryStatsCard}>
-                        <Text style={styles.cardTitle}>
-                          {t("dashboard.wasteFromProcess")}
-                        </Text>
-                        <Text
-                          style={{
-                            fontSize: 13,
-                            color: "#666",
-                            marginBottom: 12,
-                          }}
-                        >
-                          {t("dashboard.tapEditToChange")}
-                        </Text>
-                        {(() => {
-                          let lastProcess = "";
-                          return savedByProductsOnStartPage.map(
-                            (item, index) => {
-                              const pl =
-                                item.processLabel ||
-                                getProcessLabel(
-                                  item.stationName,
-                                  savedByProductsMeta?.materialTypeName,
-                                );
-                              const showHeader = pl !== lastProcess;
-                              if (showHeader) lastProcess = pl;
-                              return (
-                                <View key={index}>
-                                  {showHeader ? (
-                                    <Text
-                                      style={[
-                                        styles.processSectionHeader,
-                                        { marginTop: index > 0 ? 16 : 0 },
-                                      ]}
-                                    >
-                                      {getProcessTitle(pl)} :
-                                    </Text>
-                                  ) : null}
-                                  <View
-                                    style={[
-                                      styles.byProductRow,
-                                      { marginBottom: 8 },
-                                    ]}
-                                  >
-                                    <View style={{ flex: 1 }}>
-                                      <Text style={styles.byProductName}>
-                                        {item.name}
-                                      </Text>
-                                      <Text style={styles.byProductStation}>
-                                        {item.stationName} — {item.category}
-                                      </Text>
-                                    </View>
-                                    <View
-                                      style={{
-                                        flexDirection: "row",
-                                        alignItems: "center",
-                                      }}
-                                    >
-                                      <Text
-                                        style={[
-                                          styles.byProductName,
-                                          { marginRight: 12 },
-                                        ]}
-                                      >
-                                        {Number(item.weight) || 0} kg
-                                      </Text>
-                                      <TouchableOpacity
-                                        onPress={() => openEditByProduct(index)}
-                                        style={styles.editByProductBtn}
-                                        accessibilityLabel="Edit weight"
-                                      >
-                                        <View
-                                          style={{
-                                            flexDirection: "row",
-                                            alignItems: "center",
-                                          }}
-                                        >
-                                          <Pencil color="#0ea5e9" size={16} />
-                                          <Text
-                                            style={{
-                                              fontSize: 14,
-                                              fontWeight: "600",
-                                              color: "#0ea5e9",
-                                              marginLeft: 4,
-                                            }}
-                                          >
-                                            {t("common.edit")}
-                                          </Text>
-                                        </View>
-                                      </TouchableOpacity>
-                                    </View>
-                                  </View>
-                                </View>
-                              );
-                            },
-                          );
-                        })()}
-                        <TouchableOpacity
-                          style={[styles.closeShiftBtn, { marginTop: 16 }]}
-                          onPress={handleGeneratePdfAgain}
-                        >
-                          <View
-                            style={{
-                              flexDirection: "row",
-                              alignItems: "center",
-                              justifyContent: "center",
-                            }}
-                          >
-                            <FileText color="#FFF" size={20} />
-                            <Text
-                              style={[styles.closeShiftText, { marginLeft: 8 }]}
-                            >
-                              {t("dashboard.generatePDF")}
-                            </Text>
-                          </View>
-                        </TouchableOpacity>
-                      </View>
-                    )}
+                    {savedByProductsOnStartPage.length > 0 && renderSavedWasteCard()}
                   </>
                 )}
               </View>
@@ -8539,6 +8651,66 @@ const DashboardScreen = ({ navigation }: any) => {
               <Text style={styles.productionLineBanner}>
                 {t(productionLineTitleKeyFromRole(user?.role))}
               </Text>
+            ) : null}
+            {!isPPIC && savedByProductsOnStartPage.length > 0 ? (
+              <View style={{ width: "100%", marginBottom: 12 }}>
+                <View
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    backgroundColor: "#f0fdf4",
+                    borderWidth: 1,
+                    borderColor: "#86efac",
+                    borderRadius: 8,
+                    paddingHorizontal: 12,
+                  }}
+                >
+                  <TouchableOpacity
+                    style={{
+                      flex: 1,
+                      flexDirection: "row",
+                      alignItems: "center",
+                      paddingVertical: 10,
+                    }}
+                    onPress={() => setShowPreviousShiftWaste((open) => !open)}
+                  >
+                    <View
+                      style={
+                        showPreviousShiftWaste
+                          ? { transform: [{ rotate: "90deg" }] }
+                          : undefined
+                      }
+                    >
+                      <ChevronRight color="#166534" size={18} />
+                    </View>
+                    <Text
+                      style={{
+                        flex: 1,
+                        marginLeft: 6,
+                        fontSize: 13,
+                        fontWeight: "600",
+                        color: "#166534",
+                      }}
+                    >
+                      {t("dashboard.previousShiftWaste", {
+                        shiftName: savedByProductsMeta?.shift ?? "",
+                      })}
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={() => {
+                      setSavedByProductsOnStartPage([]);
+                      setSavedByProductsMeta(null);
+                      setClosedShiftId(null);
+                      setShowPreviousShiftWaste(false);
+                    }}
+                    hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                  >
+                    <X color="#166534" size={18} />
+                  </TouchableOpacity>
+                </View>
+                {showPreviousShiftWaste ? renderSavedWasteCard() : null}
+              </View>
             ) : null}
             <View style={styles.statusRow}>
               {shiftEndedAt ? (
